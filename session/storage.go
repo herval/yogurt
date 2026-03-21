@@ -50,3 +50,65 @@ func (s *Storage) Save(sess *Session, pcmData []byte) (string, error) {
 
 	return folder, nil
 }
+
+// Summary is a lightweight view of a saved session for listing.
+type Summary struct {
+	Folder       string
+	Name         string
+	StartTime    string
+	DurationSecs float64
+	WordCount    int
+	SpeakerCount int
+}
+
+// ListSessions returns saved sessions newest-first.
+func (s *Storage) ListSessions() []Summary {
+	entries, err := os.ReadDir(s.BaseDir)
+	if err != nil {
+		return nil
+	}
+
+	var out []Summary
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if !e.IsDir() {
+			continue
+		}
+		metaPath := filepath.Join(s.BaseDir, e.Name(), "metadata.json")
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue
+		}
+		var meta map[string]any
+		if err := json.Unmarshal(data, &meta); err != nil {
+			continue
+		}
+		name, _ := meta["name"].(string)
+		if name == "" {
+			name = e.Name()
+		}
+		startTime, _ := meta["start_time"].(string)
+		dur, _ := meta["duration_secs"].(float64)
+		words, _ := meta["word_count"].(float64)
+		speakers, _ := meta["speaker_count"].(float64)
+
+		out = append(out, Summary{
+			Folder:       filepath.Join(s.BaseDir, e.Name()),
+			Name:         name,
+			StartTime:    startTime,
+			DurationSecs: dur,
+			WordCount:    int(words),
+			SpeakerCount: int(speakers),
+		})
+	}
+	return out
+}
+
+// LoadTranscript returns the plain-text transcript for a session folder.
+func (s *Storage) LoadTranscript(folder string) string {
+	data, err := os.ReadFile(filepath.Join(folder, "transcript.txt"))
+	if err != nil {
+		return "(transcript not available)"
+	}
+	return string(data)
+}

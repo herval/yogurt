@@ -30,7 +30,7 @@ type Manager struct {
 	audioCh    chan []byte
 	audioBuf   []byte
 	stopStream chan struct{}
-	storage    *Storage
+	Storage    *Storage
 }
 
 func NewManager(apiKey string, sampleRate, deviceIndex int, sessionsDir, speechModel string) *Manager {
@@ -40,7 +40,7 @@ func NewManager(apiKey string, sampleRate, deviceIndex int, sessionsDir, speechM
 		DeviceIndex: deviceIndex,
 		SessionsDir: sessionsDir,
 		SpeechModel: speechModel,
-		storage:     NewStorage(sessionsDir),
+		Storage:     NewStorage(sessionsDir),
 	}
 }
 
@@ -309,7 +309,7 @@ func (m *Manager) Finish() (string, error) {
 	var folder string
 	if len(buf) > 0 || len(sess.Transcript.Segments) > 0 {
 		var err error
-		folder, err = m.storage.Save(sess, buf)
+		folder, err = m.Storage.Save(sess, buf)
 		if err != nil {
 			return "", err
 		}

@@ -32,6 +32,7 @@ type chatResponseMsg struct {
 	content string
 	err     error
 }
+type sessionsLoadedMsg struct{ sessions []session.Summary }
 
 // ---- Styles ----
 
@@ -77,6 +78,13 @@ type Model struct {
 	selectingMic bool
 	micListIdx   int
 
+	// home screen (session list)
+	homeMode       bool
+	sessions       []session.Summary
+	sessionIdx     int
+	viewingSession *session.Summary // nil when not viewing a past session
+	viewLines      []string         // pre-rendered lines for a viewed session
+
 	// chat panel
 	openAIKey   string
 	chatModel   string
@@ -97,6 +105,7 @@ func New(mgr *session.Manager, devices []audio.Device, cfg *config.Config) *Mode
 		devices:    devices,
 		status:     session.StatusIdle,
 		partialIdx: -1,
+		homeMode:   true,
 		openAIKey:  cfg.OpenAIKey,
 		chatModel:  cfg.ChatModel,
 		chatInput:  ti,
@@ -104,7 +113,13 @@ func New(mgr *session.Manager, devices []audio.Device, cfg *config.Config) *Mode
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tick()
+	return tea.Batch(tick(), m.cmdLoadSessions())
+}
+
+func (m *Model) cmdLoadSessions() tea.Cmd {
+	return func() tea.Msg {
+		return sessionsLoadedMsg{sessions: m.mgr.Storage.ListSessions()}
+	}
 }
 
 func tick() tea.Cmd {
@@ -163,6 +178,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.duration = "00:00:00"
 			m.audioLevel = 0
 		}
+		if msg.s == session.StatusRecording {
+			m.homeMode = false
+		}
 
 	case audioLevelMsg:
 		m.audioLevel = msg.level
@@ -170,6 +188,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errorMsg:
 		m.notice = msg.err.Error()
 		m.noticeErr = true
+
+	case sessionsLoadedMsg:
+		m.sessions = msg.sessions
+		if m.sessionIdx >= len(m.sessions) {
+			m.sessionIdx = 0
+		}
 
 	case saveResultMsg:
 		if msg.err != nil {
@@ -182,6 +206,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = "Session ended (nothing to save)"
 			m.noticeErr = false
 		}
+		// Return to home and refresh the list
+		m.homeMode = true
+		m.viewingSession = nil
+		return m, m.cmdLoadSessions()
 
 	case chatResponseMsg:
 		m.chatLoading = false
@@ -202,6 +230,42 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Home screen navigation
+	if m.homeMode {
+		switch msg.String() {
+		case "up", "k":
+			if m.sessionIdx > 0 {
+				m.sessionIdx--
+			}
+			m.viewingSession = nil
+		case "down", "j":
+			if m.sessionIdx < len(m.sessions)-1 {
+				m.sessionIdx++
+			}
+			m.viewingSession = nil
+		case "enter":
+			if m.sessionIdx < len(m.sessions) {
+				s := m.sessions[m.sessionIdx]
+				m.viewingSession = &s
+				text := m.mgr.Storage.LoadTranscript(s.Folder)
+				m.viewLines = strings.Split(text, "\n")
+			}
+		case "esc":
+			m.viewingSession = nil
+		case "n", "N":
+			m.homeMode = false
+			m.viewingSession = nil
+			m.lines = nil
+			m.partialIdx = -1
+			m.duration = "00:00:00"
+			m.notice = ""
+			return m, m.cmdStartSession()
+		case "q", "Q", "ctrl+c":
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
 	if m.selectingMic {
 		switch msg.String() {
 		case "up", "k":
@@ -356,6 +420,10 @@ func (m *Model) View() string {
 
 	if m.selectingMic {
 		return m.viewMicSelect()
+	}
+
+	if m.homeMode {
+		return m.viewHome()
 	}
 
 	var b strings.Builder
@@ -588,6 +656,111 @@ func (m *Model) renderControls() string {
 	}
 	parts = append(parts, "[Q]uit")
 	return "  " + strings.Join(parts, "  │  ")
+}
+
+func (m *Model) viewHome() string {
+	available := m.height - 6
+	if available < 3 {
+		available = 3
+	}
+	innerWidth := m.width - 4
+	if innerWidth < 20 {
+		innerWidth = 20
+	}
+
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("YOGURT - Meeting Recorder") + "\n\n")
+
+	if m.viewingSession != nil {
+		// Show transcript of selected session
+		s := m.viewingSession
+		b.WriteString(speakerStyle.Render(s.Name) + "  " +
+			dimStyle.Render(fmt.Sprintf("%s  •  %s  •  %d words",
+				s.StartTime[:10],
+				formatDuration(s.DurationSecs),
+				s.WordCount)) + "\n\n")
+
+		border := strings.Repeat("─", m.width-2)
+		b.WriteString("┌" + border + "┐\n")
+
+		// Show transcript lines scrolled to fit
+		end := len(m.viewLines)
+		start := end - (available - 4)
+		if start < 0 {
+			start = 0
+		}
+		shown := 0
+		for i := start; i < end && shown < available-4; i++ {
+			b.WriteString("│ " + truncatePad(m.viewLines[i], innerWidth) + " │\n")
+			shown++
+		}
+		// pad remaining
+		blank := strings.Repeat(" ", innerWidth)
+		for shown < available-4 {
+			b.WriteString("│ " + blank + " │\n")
+			shown++
+		}
+		b.WriteString("└" + border + "┘\n\n")
+		b.WriteString(dimStyle.Render("  Esc to go back  │  [N] New Session  │  [Q] Quit"))
+	} else {
+		// Session list
+		if len(m.sessions) == 0 {
+			b.WriteString(dimStyle.Render("  No recordings yet. Press N to start.\n"))
+		} else {
+			b.WriteString(dimStyle.Render("  Past recordings:\n\n"))
+			listHeight := available - 4
+			if listHeight < 1 {
+				listHeight = 1
+			}
+			// Window around selected index
+			start := m.sessionIdx - listHeight/2
+			if start < 0 {
+				start = 0
+			}
+			end := start + listHeight
+			if end > len(m.sessions) {
+				end = len(m.sessions)
+				start = end - listHeight
+				if start < 0 {
+					start = 0
+				}
+			}
+			for i := start; i < end; i++ {
+				s := m.sessions[i]
+				cursor := "  "
+				nameStyle := lipgloss.NewStyle()
+				if i == m.sessionIdx {
+					cursor = "> "
+					nameStyle = nameStyle.Bold(true).Foreground(lipgloss.Color("12"))
+				}
+				date := ""
+				if len(s.StartTime) >= 10 {
+					date = s.StartTime[:10]
+				}
+				name := s.Name
+				if len(name) > 30 {
+					name = name[:29] + "…"
+				}
+				meta := dimStyle.Render(fmt.Sprintf("%s  %s  %d words  %d speakers",
+					date, formatDuration(s.DurationSecs), s.WordCount, s.SpeakerCount))
+				b.WriteString(cursor + nameStyle.Render(name) + "  " + meta + "\n")
+			}
+		}
+		b.WriteString("\n" + dimStyle.Render("  ↑/↓ navigate  │  Enter to view  │  [N] New Session  │  [Q] Quit"))
+	}
+
+	return b.String()
+}
+
+func formatDuration(secs float64) string {
+	total := int(secs)
+	h := total / 3600
+	m := (total % 3600) / 60
+	s := total % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
+	}
+	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
 func (m *Model) viewMicSelect() string {

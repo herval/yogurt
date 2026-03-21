@@ -31,7 +31,7 @@ func FromEnv() *Config {
 		AudioDevice: -1,
 		SpeechModel: envOrDefault("YOGURT_SPEECH_MODEL", "universal-streaming-multilingual"),
 		OpenAIKey:   os.Getenv("OPENAI_API_KEY"),
-		ChatModel:   envOrDefault("YOGURT_CHAT_MODEL", ""),
+		ChatModel:   envOrDefault("OPENAI_MODEL", ""),
 	}
 
 	if sr := os.Getenv("YOGURT_SAMPLE_RATE"); sr != "" {
