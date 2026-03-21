@@ -101,9 +101,14 @@ type Model struct {
 	chatMsgs    []chat.Message
 	chatScroll  int
 	chatLoading bool
+
+	// template picker modal
+	templates    []chat.Template
+	templateOpen bool
+	templateIdx  int
 }
 
-func New(mgr *session.Manager, devices []audio.Device, cfg *config.Config) *Model {
+func New(mgr *session.Manager, devices []audio.Device, cfg *config.Config, templates []chat.Template) *Model {
 	ti := textinput.New()
 	ti.Placeholder = "Ask about the transcript..."
 	ti.CharLimit = 500
@@ -117,6 +122,7 @@ func New(mgr *session.Manager, devices []audio.Device, cfg *config.Config) *Mode
 		openAIKey:  cfg.OpenAIKey,
 		chatModel:  cfg.ChatModel,
 		chatInput:  ti,
+		templates:  templates,
 	}
 }
 
@@ -243,6 +249,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chatMsgs = append(m.chatMsgs, chat.Message{Role: "assistant", Content: content})
 
 	case tea.KeyMsg:
+		if m.templateOpen {
+			return m.handleTemplateKey(msg)
+		}
 		if m.chatOpen {
 			return m.handleChatKey(msg)
 		}
@@ -383,6 +392,32 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) handleTemplateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.templateOpen = false
+	case "up", "k":
+		if m.templateIdx > 0 {
+			m.templateIdx--
+		}
+	case "down", "j":
+		if m.templateIdx < len(m.templates)-1 {
+			m.templateIdx++
+		}
+	case "enter":
+		if m.templateIdx < len(m.templates) {
+			t := m.templates[m.templateIdx]
+			m.templateOpen = false
+			// Show the template name in chat history, but send the full prompt to the LLM
+			m.chatMsgs = append(m.chatMsgs, chat.Message{Role: "user", Content: t.Name})
+			m.chatLoading = true
+			m.chatScroll = 0
+			return m, m.cmdAsk(t.Prompt)
+		}
+	}
+	return m, nil
+}
+
 func (m *Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -392,6 +427,12 @@ func (m *Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		m.chatOpen = false
 		m.chatInput.Blur()
+		return m, nil
+	case "?":
+		if len(m.templates) > 0 {
+			m.templateOpen = true
+			m.templateIdx = 0
+		}
 		return m, nil
 	case "enter":
 		text := strings.TrimSpace(m.chatInput.Value())
@@ -487,6 +528,10 @@ func (m *Model) cmdAsk(userMsg string) tea.Cmd {
 func (m *Model) View() string {
 	if m.width == 0 {
 		return "Loading..."
+	}
+
+	if m.templateOpen {
+		return m.viewTemplateModal()
 	}
 
 	if m.selectingMic {
@@ -660,7 +705,7 @@ func (m *Model) renderChatPane(width int) string {
 	b.WriteString("├" + border + "┤\n")
 	inputView := m.chatInput.View()
 	b.WriteString("│ " + truncatePad(inputView, innerWidth) + " │\n")
-	b.WriteString("│ " + truncatePad(dimStyle.Render("Enter to send • Esc to close"), innerWidth) + " │\n")
+	b.WriteString("│ " + truncatePad(dimStyle.Render("Enter to send  •  ? for templates  •  Esc to close"), innerWidth) + " │\n")
 	b.WriteString("└" + border + "┘")
 	return b.String()
 }
@@ -874,6 +919,63 @@ func formatDuration(secs float64) string {
 		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
 	}
 	return fmt.Sprintf("%dm%02ds", m, s)
+}
+
+func (m *Model) viewTemplateModal() string {
+	// Determine box width from longest template name
+	maxName := 20
+	for _, t := range m.templates {
+		if len(t.Name) > maxName {
+			maxName = len(t.Name)
+		}
+	}
+	innerW := maxName + 4 // cursor(2) + name + padding(2)
+	if innerW < 30 {
+		innerW = 30
+	}
+	if innerW > m.width-6 {
+		innerW = m.width - 6
+	}
+	border := strings.Repeat("─", innerW+2)
+
+	var modalLines []string
+	modalLines = append(modalLines, "┌"+border+"┐")
+	modalLines = append(modalLines, "│ "+truncatePad(titleStyle.Render("Quick Questions"), innerW)+" │")
+	modalLines = append(modalLines, "├"+border+"┤")
+	for i, t := range m.templates {
+		var row string
+		if i == m.templateIdx {
+			row = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")).Render("> " + t.Name)
+		} else {
+			row = "  " + t.Name
+		}
+		modalLines = append(modalLines, "│ "+truncatePad(row, innerW)+" │")
+	}
+	modalLines = append(modalLines, "├"+border+"┤")
+	modalLines = append(modalLines, "│ "+truncatePad(dimStyle.Render("↑/↓ Navigate  •  Enter to send  •  Esc to close"), innerW)+" │")
+	modalLines = append(modalLines, "└"+border+"┘")
+
+	// Center vertically and horizontally
+	modalH := len(modalLines)
+	padTop := (m.height - modalH) / 2
+	if padTop < 1 {
+		padTop = 1
+	}
+	boxW := innerW + 4 // border chars
+
+	var b strings.Builder
+	for i := 0; i < padTop; i++ {
+		b.WriteByte('\n')
+	}
+	leftPad := (m.width - boxW) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	pad := strings.Repeat(" ", leftPad)
+	for _, l := range modalLines {
+		b.WriteString(pad + l + "\n")
+	}
+	return b.String()
 }
 
 func (m *Model) viewMicSelect() string {

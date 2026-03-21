@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/herval/yogurtgo/audio"
+	"github.com/herval/yogurtgo/chat"
 	"github.com/herval/yogurtgo/config"
 	"github.com/herval/yogurtgo/session"
 	"github.com/herval/yogurtgo/ui"
@@ -73,7 +75,11 @@ func main() {
 		cfg.SpeechModel,
 	)
 
-	model := ui.New(mgr, devices, cfg)
+	home, _ := os.UserHomeDir()
+	templatesPath := filepath.Join(home, ".yogurt", "chat_templates.json")
+	templates := chat.EnsureTemplatesFile(templatesPath)
+
+	model := ui.New(mgr, devices, cfg, templates)
 
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	model.WireCallbacks(p)
