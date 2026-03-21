@@ -82,8 +82,9 @@ type Model struct {
 	homeMode       bool
 	sessions       []session.Summary
 	sessionIdx     int
-	viewingSession *session.Summary // nil when not viewing a past session
-	viewLines      []string         // pre-rendered lines for a viewed session
+	viewingSession    *session.Summary // nil when not viewing a past session
+	viewLines         []string         // pre-rendered lines for a viewed session
+	viewTranscriptRaw string           // plain text used as chat context
 
 	// chat panel
 	openAIKey   string
@@ -248,10 +249,30 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s := m.sessions[m.sessionIdx]
 				m.viewingSession = &s
 				text := m.mgr.Storage.LoadTranscript(s.Folder)
+				m.viewTranscriptRaw = text
 				m.viewLines = strings.Split(text, "\n")
+				m.chatMsgs = nil // fresh chat for each session
 			}
 		case "esc":
 			m.viewingSession = nil
+			m.chatOpen = false
+		case "c", "C":
+			if m.viewingSession == nil {
+				return m, nil
+			}
+			if m.openAIKey == "" {
+				m.notice = "Set OPENAI_API_KEY to enable chat"
+				m.noticeErr = true
+				return m, nil
+			}
+			m.chatOpen = !m.chatOpen
+			if m.chatOpen {
+				m.chatScroll = 0
+				m.chatInput.Focus()
+				return m, textinput.Blink
+			}
+			m.chatInput.Blur()
+			return m, nil
 		case "n", "N":
 			m.homeMode = false
 			m.viewingSession = nil
@@ -342,7 +363,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "ctrl+c":
+	case "esc":
+		m.chatOpen = false
+		m.chatInput.Blur()
+		return m, nil
+	case "ctrl+c":
 		m.chatOpen = false
 		m.chatInput.Blur()
 		return m, nil
@@ -392,6 +417,8 @@ func (m *Model) cmdAsk(userMsg string) tea.Cmd {
 	transcript := ""
 	if sess := m.mgr.CurrentSession(); sess != nil {
 		transcript = sess.Transcript.ToPlainText()
+	} else if m.viewTranscriptRaw != "" {
+		transcript = m.viewTranscriptRaw
 	}
 	// History excludes the message we just appended (it's the user turn)
 	history := make([]chat.Message, len(m.chatMsgs)-1)
@@ -671,9 +698,6 @@ func (m *Model) viewHome() string {
 	if innerWidth < 20 {
 		innerWidth = 20
 	}
-	border := strings.Repeat("─", m.width-2)
-	blank := strings.Repeat(" ", innerWidth)
-
 	var contentLines []string
 
 	if m.viewingSession != nil {
@@ -747,19 +771,46 @@ func (m *Model) viewHome() string {
 	}
 	visible := contentLines[start:end]
 
-	b.WriteString("┌" + border + "┐\n")
-	for i := 0; i < available; i++ {
-		if i < len(visible) {
-			b.WriteString("│ " + truncatePad(visible[i], innerWidth) + " │\n")
-		} else {
-			b.WriteString("│ " + blank + " │\n")
+	// Build the main (left) pane content
+	mainPane := func(w int) string {
+		iw := w - 4
+		if iw < 10 {
+			iw = 10
 		}
+		bl := strings.Repeat("─", w-2)
+		bk := strings.Repeat(" ", iw)
+		var pb strings.Builder
+		pb.WriteString("┌" + bl + "┐\n")
+		for i := 0; i < available; i++ {
+			if i < len(visible) {
+				pb.WriteString("│ " + truncatePad(visible[i], iw) + " │\n")
+			} else {
+				pb.WriteString("│ " + bk + " │\n")
+			}
+		}
+		pb.WriteString("└" + bl + "┘")
+		return pb.String()
 	}
-	b.WriteString("└" + border + "┘\n")
+
+	if m.chatOpen && m.viewingSession != nil {
+		transcriptW := (m.width * 60) / 100
+		chatW := m.width - transcriptW
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, mainPane(transcriptW), m.renderChatPane(chatW)))
+	} else {
+		b.WriteString(mainPane(m.width))
+	}
+	b.WriteByte('\n')
 
 	// Controls
 	if m.viewingSession != nil {
-		b.WriteString("  " + strings.Join([]string{"[Esc] Back", "[N]ew Session", "[Q]uit"}, "  │  "))
+		controls := []string{"[Esc] Back", "[N]ew Session"}
+		if m.chatOpen {
+			controls = append(controls, "[Esc] Close Chat")
+		} else {
+			controls = append(controls, "[C]hat")
+		}
+		controls = append(controls, "[Q]uit")
+		b.WriteString("  " + strings.Join(controls, "  │  "))
 	} else {
 		b.WriteString("  " + strings.Join([]string{"↑/↓ Navigate", "[Enter] View", "[N]ew Session", "[Q]uit"}, "  │  "))
 	}
