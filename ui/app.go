@@ -530,10 +530,16 @@ func (m *Model) View() string {
 		return "Loading..."
 	}
 
+	base := m.renderBaseView()
+
 	if m.templateOpen {
-		return m.viewTemplateModal()
+		return m.overlayTemplateModal(base)
 	}
 
+	return base
+}
+
+func (m *Model) renderBaseView() string {
 	if m.selectingMic {
 		return m.viewMicSelect()
 	}
@@ -547,7 +553,7 @@ func (m *Model) View() string {
 	b.WriteByte('\n')
 
 	if m.chatOpen {
-		transcriptW := (m.width * 60) / 100
+		transcriptW := (m.width * 40) / 100
 		chatW := m.width - transcriptW
 		left := m.renderTranscriptPane(transcriptW)
 		right := m.renderChatPane(chatW)
@@ -885,7 +891,7 @@ func (m *Model) viewHome() string {
 	}
 
 	if m.chatOpen && m.viewingSession != nil {
-		transcriptW := (m.width * 60) / 100
+		transcriptW := (m.width * 40) / 100
 		chatW := m.width - transcriptW
 		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, mainPane(transcriptW), m.renderChatPane(chatW)))
 	} else {
@@ -921,8 +927,7 @@ func formatDuration(secs float64) string {
 	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
-func (m *Model) viewTemplateModal() string {
-	// Determine box width from longest template name
+func (m *Model) buildTemplateModalLines() []string {
 	maxName := 20
 	for _, t := range m.templates {
 		if len(t.Name) > maxName {
@@ -938,10 +943,10 @@ func (m *Model) viewTemplateModal() string {
 	}
 	border := strings.Repeat("─", innerW+2)
 
-	var modalLines []string
-	modalLines = append(modalLines, "┌"+border+"┐")
-	modalLines = append(modalLines, "│ "+truncatePad(titleStyle.Render("Quick Questions"), innerW)+" │")
-	modalLines = append(modalLines, "├"+border+"┤")
+	var lines []string
+	lines = append(lines, "┌"+border+"┐")
+	lines = append(lines, "│ "+truncatePad(titleStyle.Render("Quick Questions"), innerW)+" │")
+	lines = append(lines, "├"+border+"┤")
 	for i, t := range m.templates {
 		var row string
 		if i == m.templateIdx {
@@ -949,33 +954,70 @@ func (m *Model) viewTemplateModal() string {
 		} else {
 			row = "  " + t.Name
 		}
-		modalLines = append(modalLines, "│ "+truncatePad(row, innerW)+" │")
+		lines = append(lines, "│ "+truncatePad(row, innerW)+" │")
 	}
-	modalLines = append(modalLines, "├"+border+"┤")
-	modalLines = append(modalLines, "│ "+truncatePad(dimStyle.Render("↑/↓ Navigate  •  Enter to send  •  Esc to close"), innerW)+" │")
-	modalLines = append(modalLines, "└"+border+"┘")
+	lines = append(lines, "├"+border+"┤")
+	lines = append(lines, "│ "+truncatePad(dimStyle.Render("↑/↓ Navigate  •  Enter to send  •  Esc to close"), innerW)+" │")
+	lines = append(lines, "└"+border+"┘")
+	return lines
+}
 
-	// Center vertically and horizontally
+func (m *Model) overlayTemplateModal(base string) string {
+	modalLines := m.buildTemplateModalLines()
 	modalH := len(modalLines)
-	padTop := (m.height - modalH) / 2
-	if padTop < 1 {
-		padTop = 1
-	}
-	boxW := innerW + 4 // border chars
+	boxW := lipgloss.Width(modalLines[0])
 
-	var b strings.Builder
-	for i := 0; i < padTop; i++ {
-		b.WriteByte('\n')
+	startRow := (m.height - modalH) / 2
+	startCol := (m.width - boxW) / 2
+	if startRow < 0 {
+		startRow = 0
 	}
-	leftPad := (m.width - boxW) / 2
-	if leftPad < 0 {
-		leftPad = 0
+	if startCol < 0 {
+		startCol = 0
 	}
-	pad := strings.Repeat(" ", leftPad)
-	for _, l := range modalLines {
-		b.WriteString(pad + l + "\n")
+
+	baseLines := strings.Split(base, "\n")
+	for len(baseLines) < startRow+modalH {
+		baseLines = append(baseLines, "")
 	}
-	return b.String()
+
+	for i, ml := range modalLines {
+		row := startRow + i
+		if row >= len(baseLines) {
+			break
+		}
+		// Keep visible characters to the left of the modal, then place modal line
+		plain := stripANSI(baseLines[row])
+		runes := []rune(plain)
+		var left string
+		if startCol <= len(runes) {
+			left = string(runes[:startCol])
+		} else {
+			left = plain + strings.Repeat(" ", startCol-len(runes))
+		}
+		baseLines[row] = left + ml
+	}
+	return strings.Join(baseLines, "\n")
+}
+
+// stripANSI removes ANSI escape sequences to allow safe column-based slicing.
+func stripANSI(s string) string {
+	var out strings.Builder
+	inEsc := false
+	for _, r := range s {
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
 }
 
 func (m *Model) viewMicSelect() string {
