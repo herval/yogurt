@@ -15,7 +15,9 @@ type Config struct {
 	SampleRate  int
 	AudioDevice int // -1 = default
 	DeviceName  string
-	SpeechModel string // e.g. "universal-streaming-english", "universal-streaming"
+	SpeechModel string // e.g. "universal-streaming-multilingual"
+	OpenAIKey   string
+	ChatModel   string // e.g. "gpt-4o-mini"
 }
 
 func FromEnv() *Config {
@@ -28,6 +30,8 @@ func FromEnv() *Config {
 		SampleRate:  16000,
 		AudioDevice: -1,
 		SpeechModel: envOrDefault("YOGURT_SPEECH_MODEL", "universal-streaming-multilingual"),
+		OpenAIKey:   os.Getenv("OPENAI_API_KEY"),
+		ChatModel:   envOrDefault("YOGURT_CHAT_MODEL", ""),
 	}
 
 	if sr := os.Getenv("YOGURT_SAMPLE_RATE"); sr != "" {

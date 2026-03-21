@@ -1,14 +1,18 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/herval/yogurtgo/audio"
+	"github.com/herval/yogurtgo/chat"
+	"github.com/herval/yogurtgo/config"
 	"github.com/herval/yogurtgo/session"
 	"github.com/herval/yogurtgo/transcription"
 )
@@ -24,7 +28,10 @@ type saveResultMsg struct {
 	folder string
 	err    error
 }
-type permissionResultMsg struct{ err error }
+type chatResponseMsg struct {
+	content string
+	err     error
+}
 
 // ---- Styles ----
 
@@ -37,8 +44,9 @@ var (
 	timeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
 	dimStyle     = lipgloss.NewStyle().Faint(true)
 	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	borderStyle  = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("4"))
 	noticeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	userStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	aiStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 )
 
 // ---- Transcript line ----
@@ -58,8 +66,8 @@ type Model struct {
 	audioLevel float64
 	duration   string
 	lines      []line
-	partialIdx int // index of current partial line (-1 if none)
-	scroll     int // how many lines scrolled up from bottom
+	partialIdx int
+	scroll     int
 	width      int
 	height     int
 	notice     string
@@ -68,14 +76,30 @@ type Model struct {
 	// device selection
 	selectingMic bool
 	micListIdx   int
+
+	// chat panel
+	openAIKey   string
+	chatModel   string
+	chatOpen    bool
+	chatInput   textinput.Model
+	chatMsgs    []chat.Message
+	chatScroll  int
+	chatLoading bool
 }
 
-func New(mgr *session.Manager, devices []audio.Device) *Model {
+func New(mgr *session.Manager, devices []audio.Device, cfg *config.Config) *Model {
+	ti := textinput.New()
+	ti.Placeholder = "Ask about the transcript..."
+	ti.CharLimit = 500
+
 	return &Model{
 		mgr:        mgr,
 		devices:    devices,
 		status:     session.StatusIdle,
 		partialIdx: -1,
+		openAIKey:  cfg.OpenAIKey,
+		chatModel:  cfg.ChatModel,
+		chatInput:  ti,
 	}
 }
 
@@ -90,6 +114,19 @@ func tick() tea.Cmd {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Always forward messages to the textinput when chat is open
+	// (needed for cursor blink etc.), but don't let it consume key events yet.
+	if m.chatOpen {
+		if _, isKey := msg.(tea.KeyMsg); !isKey {
+			var tiCmd tea.Cmd
+			m.chatInput, tiCmd = m.chatInput.Update(msg)
+			if tiCmd != nil {
+				// handle non-key updates and continue processing below
+				_ = tiCmd
+			}
+		}
+	}
+
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -119,9 +156,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.partialIdx = len(m.lines) - 1
 			}
 		}
-		if m.scroll == 0 {
-			// auto-scroll to bottom: no-op, we always render from end
-		}
 
 	case statusMsg:
 		m.status = msg.s
@@ -149,16 +183,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.noticeErr = false
 		}
 
-	case permissionResultMsg:
+	case chatResponseMsg:
+		m.chatLoading = false
+		content := msg.content
 		if msg.err != nil {
-			m.notice = msg.err.Error()
-			m.noticeErr = true
-		} else {
-			m.notice = "Microphone access granted"
-			m.noticeErr = false
+			content = "Error: " + msg.err.Error()
 		}
+		m.chatMsgs = append(m.chatMsgs, chat.Message{Role: "assistant", Content: content})
 
 	case tea.KeyMsg:
+		if m.chatOpen {
+			return m.handleChatKey(msg)
+		}
 		return m.handleKey(msg)
 	}
 
@@ -215,6 +251,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selectingMic = true
 			m.micListIdx = 0
 		}
+	case "c", "C":
+		if m.openAIKey == "" {
+			m.notice = "Set OPENAI_API_KEY to enable chat"
+			m.noticeErr = true
+			return m, nil
+		}
+		m.chatOpen = true
+		m.chatScroll = 0
+		m.chatInput.Focus()
+		return m, textinput.Blink
 	case "q", "Q", "ctrl+c":
 		if m.status == session.StatusRecording || m.status == session.StatusPaused {
 			return m, tea.Sequence(m.cmdFinish(), tea.Quit)
@@ -230,10 +276,40 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.chatOpen = false
+		m.chatInput.Blur()
+		return m, nil
+	case "enter":
+		text := strings.TrimSpace(m.chatInput.Value())
+		if text == "" || m.chatLoading {
+			return m, nil
+		}
+		m.chatMsgs = append(m.chatMsgs, chat.Message{Role: "user", Content: text})
+		m.chatInput.Reset()
+		m.chatLoading = true
+		m.chatScroll = 0
+		return m, m.cmdAsk(text)
+	case "up":
+		m.chatScroll++
+		return m, nil
+	case "down":
+		if m.chatScroll > 0 {
+			m.chatScroll--
+		}
+		return m, nil
+	default:
+		var tiCmd tea.Cmd
+		m.chatInput, tiCmd = m.chatInput.Update(msg)
+		return m, tiCmd
+	}
+}
+
 func (m *Model) cmdStartSession() tea.Cmd {
 	return func() tea.Msg {
-		err := m.mgr.StartSession("")
-		if err != nil {
+		if err := m.mgr.StartSession(""); err != nil {
 			return errorMsg{err}
 		}
 		return nil
@@ -247,7 +323,32 @@ func (m *Model) cmdFinish() tea.Cmd {
 	}
 }
 
-// View renders the full TUI.
+func (m *Model) cmdAsk(userMsg string) tea.Cmd {
+	// Snapshot on UI goroutine before launching background work
+	transcript := ""
+	if sess := m.mgr.CurrentSession(); sess != nil {
+		transcript = sess.Transcript.ToPlainText()
+	}
+	// History excludes the message we just appended (it's the user turn)
+	history := make([]chat.Message, len(m.chatMsgs)-1)
+	copy(history, m.chatMsgs[:len(m.chatMsgs)-1])
+
+	systemPrompt := "You are a helpful assistant answering questions about a live meeting recording. " +
+		"Answer concisely based on the transcript below. If the transcript is empty or the answer isn't there, say so.\n\n" +
+		"Transcript so far:\n" + transcript
+
+	client := chat.New(m.openAIKey, m.chatModel)
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		reply, err := client.Ask(ctx, systemPrompt, history, userMsg)
+		return chatResponseMsg{content: reply, err: err}
+	}
+}
+
+// ---- View ----
+
 func (m *Model) View() string {
 	if m.width == 0 {
 		return "Loading..."
@@ -258,10 +359,19 @@ func (m *Model) View() string {
 	}
 
 	var b strings.Builder
-
 	b.WriteString(m.renderHeader())
 	b.WriteByte('\n')
-	b.WriteString(m.renderTranscript())
+
+	if m.chatOpen {
+		transcriptW := (m.width * 60) / 100
+		chatW := m.width - transcriptW
+		left := m.renderTranscriptPane(transcriptW)
+		right := m.renderChatPane(chatW)
+		b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, left, right))
+	} else {
+		b.WriteString(m.renderTranscriptPane(m.width))
+	}
+
 	b.WriteByte('\n')
 	b.WriteString(m.renderStatusBar())
 	b.WriteByte('\n')
@@ -301,18 +411,25 @@ func (m *Model) renderHeader() string {
 	return " " + title + strings.Repeat(" ", gap) + indicator
 }
 
-func (m *Model) renderTranscript() string {
-	// Calculate available height: total - header(1) - newline(1) - statusbar(1) - newline(1) - controls(1) - notice(up to 2)
-	available := m.height - 8
+func (m *Model) paneHeight() int {
+	// rows used: header(1) + newline(1) + statusbar(1) + newline(1) + controls(1) + notice(1) + some buffer
+	available := m.height - 7
 	if available < 3 {
 		available = 3
 	}
+	return available
+}
 
-	// Build lines to display
-	displayLines := m.buildDisplayLines()
+func (m *Model) renderTranscriptPane(width int) string {
+	available := m.paneHeight()
+	innerWidth := width - 4
+	if innerWidth < 10 {
+		innerWidth = 10
+	}
+
+	displayLines := m.buildDisplayLines(innerWidth)
 	total := len(displayLines)
 
-	// Apply scroll
 	end := total - m.scroll
 	if end < 0 {
 		end = 0
@@ -324,80 +441,89 @@ func (m *Model) renderTranscript() string {
 	visible := displayLines[start:end]
 
 	var b strings.Builder
-	inner := strings.Repeat(" ", m.width-2)
-	border := strings.Repeat("─", m.width-2)
+	border := strings.Repeat("─", width-2)
+	blank := strings.Repeat(" ", width-4)
+
 	b.WriteString("┌" + border + "┐\n")
 	for i := 0; i < available; i++ {
 		if i < len(visible) {
-			line := visible[i]
-			padded := truncatePad(line, m.width-4)
-			b.WriteString("│ " + padded + " │\n")
+			b.WriteString("│ " + truncatePad(visible[i], width-4) + " │\n")
 		} else {
-			b.WriteString("│ " + inner + " │\n")
+			b.WriteString("│ " + blank + " │\n")
 		}
 	}
 	b.WriteString("└" + border + "┘")
 	return b.String()
 }
 
-// buildDisplayLines produces rendered strings for each transcript line.
-func (m *Model) buildDisplayLines() []string {
-	innerWidth := m.width - 4 // 2 for borders + 2 for padding
-	if innerWidth < 20 {
-		innerWidth = 20
+func (m *Model) renderChatPane(width int) string {
+	available := m.paneHeight()
+	innerWidth := width - 4
+	if innerWidth < 10 {
+		innerWidth = 10
+	}
+	// Reserve 3 rows for the input area (divider + input + bottom border)
+	msgHeight := available - 3
+	if msgHeight < 1 {
+		msgHeight = 1
 	}
 
-	var out []string
-	for _, l := range m.lines {
-		seg := l.seg
-		ts := timeStyle.Render("[" + seg.FormatTimestamp() + "]")
-		sp := speakerStyle.Render("Speaker " + seg.Speaker)
-		header := ts + " " + sp
-		if l.partial {
-			header += dimStyle.Render(" (partial)")
-		}
-		out = append(out, header)
-
-		// Word-wrap the transcript text
-		wrapped := wordWrap(seg.Text, innerWidth-2) // -2 for the "  " indent
-		for _, line := range wrapped {
-			if l.partial {
-				out = append(out, "  "+dimStyle.Render(line))
-			} else {
-				out = append(out, "  "+line)
-			}
-		}
-		out = append(out, "")
-	}
-	return out
-}
-
-// wordWrap breaks text into lines of at most width visible characters.
-func wordWrap(text string, width int) []string {
-	if width <= 0 {
-		return []string{text}
-	}
-	var lines []string
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return []string{""}
-	}
-
-	current := ""
-	for _, word := range words {
-		if current == "" {
-			current = word
-		} else if len(current)+1+len(word) <= width {
-			current += " " + word
+	// Build message lines
+	var allLines []string
+	for _, msg := range m.chatMsgs {
+		var label string
+		var style lipgloss.Style
+		if msg.Role == "user" {
+			label = "You"
+			style = userStyle
 		} else {
-			lines = append(lines, current)
-			current = word
+			label = "AI"
+			style = aiStyle
+		}
+		allLines = append(allLines, style.Render(label+":"))
+		for _, l := range wordWrap(msg.Content, innerWidth-2) {
+			allLines = append(allLines, "  "+l)
+		}
+		allLines = append(allLines, "")
+	}
+	if m.chatLoading {
+		allLines = append(allLines, dimStyle.Render("  thinking..."))
+	}
+	if len(allLines) == 0 {
+		allLines = append(allLines, dimStyle.Render("  Ask anything about the recording..."))
+	}
+
+	// Scroll windowing
+	total := len(allLines)
+	end := total - m.chatScroll
+	if end < 0 {
+		end = 0
+	}
+	start := end - msgHeight
+	if start < 0 {
+		start = 0
+	}
+	visible := allLines[start:end]
+
+	blank := strings.Repeat(" ", innerWidth)
+	border := strings.Repeat("─", width-2)
+
+	var b strings.Builder
+	b.WriteString("┌" + border + "┐\n")
+	for i := 0; i < msgHeight; i++ {
+		if i < len(visible) {
+			b.WriteString("│ " + truncatePad(visible[i], innerWidth) + " │\n")
+		} else {
+			b.WriteString("│ " + blank + " │\n")
 		}
 	}
-	if current != "" {
-		lines = append(lines, current)
-	}
-	return lines
+	// Input area
+	b.WriteString("├" + border + "┤\n")
+	inputView := m.chatInput.View()
+	b.WriteString("│ " + truncatePad(inputView, innerWidth) + " │\n")
+	b.WriteString("│ " + truncatePad(dimStyle.Render("Enter to send • Esc to close"), innerWidth) + " │\n")
+	b.WriteString("└" + border + "┘")
+	return b.String()
 }
 
 func (m *Model) renderStatusBar() string {
@@ -440,8 +566,7 @@ func (m *Model) levelMeter() string {
 }
 
 func (m *Model) renderControls() string {
-	parts := []string{}
-
+	var parts []string
 	if m.status == session.StatusIdle || m.status == session.StatusFinished {
 		parts = append(parts, "[N]ew Session")
 	}
@@ -456,8 +581,12 @@ func (m *Model) renderControls() string {
 	if m.status != session.StatusRecording {
 		parts = append(parts, "[M]ic")
 	}
+	if m.chatOpen {
+		parts = append(parts, "[Esc]Close Chat")
+	} else {
+		parts = append(parts, "[C]hat")
+	}
 	parts = append(parts, "[Q]uit")
-
 	return "  " + strings.Join(parts, "  │  ")
 }
 
@@ -475,12 +604,64 @@ func (m *Model) viewMicSelect() string {
 	return b.String()
 }
 
-// truncatePad truncates or pads a string to exactly w visible characters.
+// buildDisplayLines produces word-wrapped rendered strings for the transcript.
+func (m *Model) buildDisplayLines(innerWidth int) []string {
+	if innerWidth < 20 {
+		innerWidth = 20
+	}
+	var out []string
+	for _, l := range m.lines {
+		seg := l.seg
+		ts := timeStyle.Render("[" + seg.FormatTimestamp() + "]")
+		sp := speakerStyle.Render("Speaker " + seg.Speaker)
+		header := ts + " " + sp
+		if l.partial {
+			header += dimStyle.Render(" (partial)")
+		}
+		out = append(out, header)
+		for _, wrapped := range wordWrap(seg.Text, innerWidth-2) {
+			if l.partial {
+				out = append(out, "  "+dimStyle.Render(wrapped))
+			} else {
+				out = append(out, "  "+wrapped)
+			}
+		}
+		out = append(out, "")
+	}
+	return out
+}
+
+// wordWrap breaks text into lines of at most width visible characters.
+func wordWrap(text string, width int) []string {
+	if width <= 0 {
+		return []string{text}
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var lines []string
+	current := ""
+	for _, word := range words {
+		if current == "" {
+			current = word
+		} else if len(current)+1+len(word) <= width {
+			current += " " + word
+		} else {
+			lines = append(lines, current)
+			current = word
+		}
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+// truncatePad truncates or pads s to exactly w visible characters.
 func truncatePad(s string, w int) string {
-	// Strip ANSI for width calculation isn't trivial; use lipgloss width
 	visible := lipgloss.Width(s)
 	if visible > w {
-		// crude truncation
 		runes := []rune(s)
 		if len(runes) > w {
 			return string(runes[:w])
@@ -492,8 +673,7 @@ func truncatePad(s string, w int) string {
 	return s
 }
 
-// --- Adapter: wire manager callbacks to bubbletea messages ---
-
+// WireCallbacks connects session manager callbacks to the Bubble Tea program.
 func (m *Model) WireCallbacks(p *tea.Program) {
 	m.mgr.OnSegment = func(seg transcription.Segment) {
 		p.Send(transcriptMsg{seg})

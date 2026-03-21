@@ -73,7 +73,7 @@ func main() {
 		cfg.SpeechModel,
 	)
 
-	model := ui.New(mgr, devices)
+	model := ui.New(mgr, devices, cfg)
 
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	model.WireCallbacks(p)
