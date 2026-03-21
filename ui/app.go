@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/herval/yogurtgo/audio"
@@ -432,11 +433,14 @@ func (m *Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.chatInput.Blur()
 		return m, nil
 	case "?":
-		if len(m.templates) > 0 {
+		if len(m.templates) > 0 && m.chatInput.Value() == "" {
 			m.templateOpen = true
 			m.templateIdx = 0
+			return m, nil
 		}
-		return m, nil
+		var tiCmd tea.Cmd
+		m.chatInput, tiCmd = m.chatInput.Update(msg)
+		return m, tiCmd
 	case "enter":
 		text := strings.TrimSpace(m.chatInput.Value())
 		if text == "" || m.chatLoading {
@@ -662,20 +666,29 @@ func (m *Model) renderChatPane(width int) string {
 	}
 
 	// Build message lines
+	renderer, _ := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(innerWidth-2),
+	)
+
 	var allLines []string
 	for _, msg := range m.chatMsgs {
-		var label string
-		var style lipgloss.Style
 		if msg.Role == "user" {
-			label = "You"
-			style = userStyle
+			allLines = append(allLines, userStyle.Render("You:"))
+			for _, l := range wordWrap(msg.Content, innerWidth-2) {
+				allLines = append(allLines, "  "+l)
+			}
 		} else {
-			label = "AI"
-			style = aiStyle
-		}
-		allLines = append(allLines, style.Render(label+":"))
-		for _, l := range wordWrap(msg.Content, innerWidth-2) {
-			allLines = append(allLines, "  "+l)
+			allLines = append(allLines, aiStyle.Render("AI:"))
+			rendered := msg.Content
+			if renderer != nil {
+				if out, err := renderer.Render(msg.Content); err == nil {
+					rendered = out
+				}
+			}
+			for _, l := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
+				allLines = append(allLines, l)
+			}
 		}
 		allLines = append(allLines, "")
 	}
