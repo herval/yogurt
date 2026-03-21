@@ -55,10 +55,35 @@ func (s *Storage) Save(sess *Session, pcmData []byte) (string, error) {
 type Summary struct {
 	Folder       string
 	Name         string
+	Title        string // LLM-generated title, empty if not yet generated
+	Summary      string // LLM-generated summary
 	StartTime    string
 	DurationSecs float64
 	WordCount    int
 	SpeakerCount int
+}
+
+// SaveMeta writes title and summary into an existing session folder,
+// updating metadata.json and writing summary.md.
+func (s *Storage) SaveMeta(folder, title, summary string) error {
+	// Update metadata.json with title + summary
+	metaPath := filepath.Join(folder, "metadata.json")
+	var meta map[string]any
+	if data, err := os.ReadFile(metaPath); err == nil {
+		_ = json.Unmarshal(data, &meta)
+	}
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	meta["title"] = title
+	meta["summary"] = summary
+	if data, err := json.MarshalIndent(meta, "", "  "); err == nil {
+		_ = os.WriteFile(metaPath, data, 0644)
+	}
+
+	// Write summary.md
+	content := "# " + title + "\n\n" + summary + "\n"
+	return os.WriteFile(filepath.Join(folder, "summary.md"), []byte(content), 0644)
 }
 
 // ListSessions returns saved sessions newest-first.
@@ -87,6 +112,8 @@ func (s *Storage) ListSessions() []Summary {
 		if name == "" {
 			name = e.Name()
 		}
+		title, _ := meta["title"].(string)
+		summary, _ := meta["summary"].(string)
 		startTime, _ := meta["start_time"].(string)
 		dur, _ := meta["duration_secs"].(float64)
 		words, _ := meta["word_count"].(float64)
@@ -95,6 +122,8 @@ func (s *Storage) ListSessions() []Summary {
 		out = append(out, Summary{
 			Folder:       filepath.Join(s.BaseDir, e.Name()),
 			Name:         name,
+			Title:        title,
+			Summary:      summary,
 			StartTime:    startTime,
 			DurationSecs: dur,
 			WordCount:    int(words),

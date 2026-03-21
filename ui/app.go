@@ -25,11 +25,18 @@ type audioLevelMsg struct{ level float64 }
 type errorMsg struct{ err error }
 type tickMsg struct{}
 type saveResultMsg struct {
-	folder string
-	err    error
+	folder     string
+	transcript string
+	err        error
 }
 type chatResponseMsg struct {
 	content string
+	err     error
+}
+type metaGeneratedMsg struct {
+	folder  string
+	title   string
+	summary string
 	err     error
 }
 type sessionsLoadedMsg struct{ sessions []session.Summary }
@@ -200,16 +207,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.notice = "Error saving: " + msg.err.Error()
 			m.noticeErr = true
+			m.homeMode = true
+			m.viewingSession = nil
+			return m, m.cmdLoadSessions()
 		} else if msg.folder != "" {
-			m.notice = "Saved to " + msg.folder
+			m.notice = "Saved — generating title & summary..."
 			m.noticeErr = false
+			m.homeMode = true
+			m.viewingSession = nil
+			return m, tea.Batch(m.cmdLoadSessions(), m.cmdGenerateMeta(msg.folder, msg.transcript))
 		} else {
 			m.notice = "Session ended (nothing to save)"
 			m.noticeErr = false
+			m.homeMode = true
+			m.viewingSession = nil
+			return m, m.cmdLoadSessions()
 		}
-		// Return to home and refresh the list
-		m.homeMode = true
-		m.viewingSession = nil
+
+	case metaGeneratedMsg:
+		if msg.err != nil {
+			m.notice = "Saved (could not generate title: " + msg.err.Error() + ")"
+			m.noticeErr = false
+		} else {
+			m.notice = "\"" + msg.title + "\""
+			m.noticeErr = false
+		}
 		return m, m.cmdLoadSessions()
 
 	case chatResponseMsg:
@@ -406,9 +428,31 @@ func (m *Model) cmdStartSession() tea.Cmd {
 }
 
 func (m *Model) cmdFinish() tea.Cmd {
+	// Snapshot transcript before the session is torn down
+	transcript := ""
+	if sess := m.mgr.CurrentSession(); sess != nil {
+		transcript = sess.Transcript.ToPlainText()
+	}
 	return func() tea.Msg {
 		folder, err := m.mgr.Finish()
-		return saveResultMsg{folder: folder, err: err}
+		return saveResultMsg{folder: folder, transcript: transcript, err: err}
+	}
+}
+
+func (m *Model) cmdGenerateMeta(folder, transcript string) tea.Cmd {
+	if m.openAIKey == "" || transcript == "" {
+		return nil
+	}
+	client := chat.New(m.openAIKey, m.chatModel)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		meta, err := client.GenerateMeta(ctx, transcript)
+		if err != nil {
+			return metaGeneratedMsg{folder: folder, err: err}
+		}
+		_ = m.mgr.Storage.SaveMeta(folder, meta.Title, meta.Summary)
+		return metaGeneratedMsg{folder: folder, title: meta.Title, summary: meta.Summary}
 	}
 }
 
@@ -730,7 +774,10 @@ func (m *Model) viewHome() string {
 				if len(s.StartTime) >= 10 {
 					date = s.StartTime[:10]
 				}
-				name := s.Name
+				name := s.Title
+				if name == "" {
+					name = s.Name
+				}
 				if lipgloss.Width(name) > 35 {
 					name = string([]rune(name)[:34]) + "…"
 				}
