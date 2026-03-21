@@ -659,94 +659,109 @@ func (m *Model) renderControls() string {
 }
 
 func (m *Model) viewHome() string {
-	available := m.height - 6
-	if available < 3 {
-		available = 3
-	}
+	var b strings.Builder
+
+	// Header
+	b.WriteString(m.renderHeader())
+	b.WriteByte('\n')
+
+	// Content pane
+	available := m.paneHeight()
 	innerWidth := m.width - 4
 	if innerWidth < 20 {
 		innerWidth = 20
 	}
+	border := strings.Repeat("─", m.width-2)
+	blank := strings.Repeat(" ", innerWidth)
 
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("YOGURT - Meeting Recorder") + "\n\n")
+	var contentLines []string
 
 	if m.viewingSession != nil {
-		// Show transcript of selected session
 		s := m.viewingSession
-		b.WriteString(speakerStyle.Render(s.Name) + "  " +
-			dimStyle.Render(fmt.Sprintf("%s  •  %s  •  %d words",
-				s.StartTime[:10],
-				formatDuration(s.DurationSecs),
-				s.WordCount)) + "\n\n")
-
-		border := strings.Repeat("─", m.width-2)
-		b.WriteString("┌" + border + "┐\n")
-
-		// Show transcript lines scrolled to fit
-		end := len(m.viewLines)
-		start := end - (available - 4)
-		if start < 0 {
-			start = 0
+		date := ""
+		if len(s.StartTime) >= 10 {
+			date = s.StartTime[:10]
 		}
-		shown := 0
-		for i := start; i < end && shown < available-4; i++ {
-			b.WriteString("│ " + truncatePad(m.viewLines[i], innerWidth) + " │\n")
-			shown++
+		header := speakerStyle.Render(s.Name) + "  " +
+			dimStyle.Render(fmt.Sprintf("%s  •  %s  •  %d words", date, formatDuration(s.DurationSecs), s.WordCount))
+		contentLines = append(contentLines, header, "")
+		for _, l := range m.viewLines {
+			for _, wl := range wordWrap(l, innerWidth) {
+				contentLines = append(contentLines, wl)
+			}
 		}
-		// pad remaining
-		blank := strings.Repeat(" ", innerWidth)
-		for shown < available-4 {
-			b.WriteString("│ " + blank + " │\n")
-			shown++
-		}
-		b.WriteString("└" + border + "┘\n\n")
-		b.WriteString(dimStyle.Render("  Esc to go back  │  [N] New Session  │  [Q] Quit"))
 	} else {
-		// Session list
 		if len(m.sessions) == 0 {
-			b.WriteString(dimStyle.Render("  No recordings yet. Press N to start.\n"))
+			contentLines = append(contentLines, dimStyle.Render("No recordings yet. Press N to start a new session."))
 		} else {
-			b.WriteString(dimStyle.Render("  Past recordings:\n\n"))
-			listHeight := available - 4
-			if listHeight < 1 {
-				listHeight = 1
-			}
-			// Window around selected index
-			start := m.sessionIdx - listHeight/2
-			if start < 0 {
-				start = 0
-			}
-			end := start + listHeight
-			if end > len(m.sessions) {
-				end = len(m.sessions)
-				start = end - listHeight
-				if start < 0 {
-					start = 0
-				}
-			}
-			for i := start; i < end; i++ {
-				s := m.sessions[i]
+			contentLines = append(contentLines, dimStyle.Render("Past recordings:"), "")
+			for i, s := range m.sessions {
 				cursor := "  "
-				nameStyle := lipgloss.NewStyle()
+				ns := lipgloss.NewStyle()
 				if i == m.sessionIdx {
 					cursor = "> "
-					nameStyle = nameStyle.Bold(true).Foreground(lipgloss.Color("12"))
+					ns = ns.Bold(true).Foreground(lipgloss.Color("12"))
 				}
 				date := ""
 				if len(s.StartTime) >= 10 {
 					date = s.StartTime[:10]
 				}
 				name := s.Name
-				if len(name) > 30 {
-					name = name[:29] + "…"
+				if lipgloss.Width(name) > 35 {
+					name = string([]rune(name)[:34]) + "…"
 				}
-				meta := dimStyle.Render(fmt.Sprintf("%s  %s  %d words  %d speakers",
+				meta := dimStyle.Render(fmt.Sprintf("  %s  %s  %d words  %d speakers",
 					date, formatDuration(s.DurationSecs), s.WordCount, s.SpeakerCount))
-				b.WriteString(cursor + nameStyle.Render(name) + "  " + meta + "\n")
+				contentLines = append(contentLines, cursor+ns.Render(name)+meta)
 			}
 		}
-		b.WriteString("\n" + dimStyle.Render("  ↑/↓ navigate  │  Enter to view  │  [N] New Session  │  [Q] Quit"))
+	}
+
+	// Scroll windowing
+	total := len(contentLines)
+	end := total - m.scroll
+	if end < 0 {
+		end = 0
+	}
+	start := end - available
+	if start < 0 {
+		start = 0
+	}
+	// When viewing session list, keep selected item visible
+	if m.viewingSession == nil && len(m.sessions) > 0 {
+		// +2 for the header lines
+		selLine := m.sessionIdx + 2
+		if selLine < start {
+			start = selLine
+			end = start + available
+			if end > total {
+				end = total
+			}
+		} else if selLine >= end {
+			end = selLine + 1
+			start = end - available
+			if start < 0 {
+				start = 0
+			}
+		}
+	}
+	visible := contentLines[start:end]
+
+	b.WriteString("┌" + border + "┐\n")
+	for i := 0; i < available; i++ {
+		if i < len(visible) {
+			b.WriteString("│ " + truncatePad(visible[i], innerWidth) + " │\n")
+		} else {
+			b.WriteString("│ " + blank + " │\n")
+		}
+	}
+	b.WriteString("└" + border + "┘\n")
+
+	// Controls
+	if m.viewingSession != nil {
+		b.WriteString("  " + strings.Join([]string{"[Esc] Back", "[N]ew Session", "[Q]uit"}, "  │  "))
+	} else {
+		b.WriteString("  " + strings.Join([]string{"↑/↓ Navigate", "[Enter] View", "[N]ew Session", "[Q]uit"}, "  │  "))
 	}
 
 	return b.String()
