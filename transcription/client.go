@@ -54,6 +54,7 @@ func (c *Client) Connect() error {
 	q.Set("sample_rate", fmt.Sprintf("%d", c.sampleRate))
 	q.Set("encoding", "pcm_s16le")
 	q.Set("speech_model", c.speechModel)
+	q.Set("diarization", "true")
 	u.RawQuery = q.Encode()
 
 	hdr := http.Header{}
@@ -142,10 +143,14 @@ func (c *Client) handleTurn(data map[string]any) {
 	endOfTurn, _ := data["end_of_turn"].(bool)
 
 	var startTime, endTime, confidence float64 = 0, 0, 1.0
+	var speakerID string
 	if words, ok := data["words"].([]any); ok && len(words) > 0 {
 		if w0, ok := words[0].(map[string]any); ok {
 			if v, ok := w0["start"].(float64); ok {
 				startTime = v / 1000.0
+			}
+			if s, ok := w0["speaker"].(string); ok {
+				speakerID = s
 			}
 		}
 		if wN, ok := words[len(words)-1].(map[string]any); ok {
@@ -166,7 +171,14 @@ func (c *Client) handleTurn(data map[string]any) {
 		confidence = total / float64(len(words))
 	}
 
+	// Map "speaker_0" -> "A", "speaker_1" -> "B", etc.
+	// Fall back to turn_order if no speaker field (diarization not available).
 	speaker := string(rune('A' + turnOrder%26))
+	if speakerID != "" {
+		var n int
+		fmt.Sscanf(speakerID, "speaker_%d", &n)
+		speaker = string(rune('A' + n%26))
+	}
 
 	seg := Segment{
 		Text:       text,

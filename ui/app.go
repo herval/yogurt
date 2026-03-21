@@ -247,6 +247,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			content = "Error: " + msg.err.Error()
 		}
 		m.chatMsgs = append(m.chatMsgs, chat.Message{Role: "assistant", Content: content})
+		if m.viewingSession != nil && m.viewingSession.Folder != "" {
+			_ = m.mgr.Storage.SaveChat(m.viewingSession.Folder, m.chatMsgs)
+		}
 
 	case tea.KeyMsg:
 		if m.templateOpen {

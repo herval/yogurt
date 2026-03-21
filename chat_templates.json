@@ -1,22 +1,22 @@
 [
   {
     "name": "TL;DR",
-    "prompt": "Give me a brief summary (tl;dr) of this recording in 2-3 sentences."
+    "prompt": "Give me a tl;dr of this recording in 2-3 sentences. Be concise."
   },
   {
     "name": "What did I miss?",
-    "prompt": "What were the most important points discussed? List the key decisions, action items, or insights I should know about."
+    "prompt": "What were the most important points? Give me a short bullet list (max 5 items)."
   },
   {
     "name": "Action items",
-    "prompt": "List all action items, tasks, or commitments mentioned in this recording. Include who is responsible if mentioned."
+    "prompt": "List action items from this recording as a short bullet list. Include owner if mentioned. No extra commentary."
   },
   {
     "name": "Key decisions",
-    "prompt": "What decisions were made during this meeting or conversation? List them clearly."
+    "prompt": "List decisions made in this meeting as a short bullet list. No extra commentary."
   },
   {
     "name": "Open questions",
-    "prompt": "What questions were raised but not resolved? List any unresolved topics or follow-up items."
+    "prompt": "List unresolved questions or follow-ups as a short bullet list. No extra commentary."
   }
 ]

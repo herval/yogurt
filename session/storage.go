@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/herval/yogurtgo/audio"
+	"github.com/herval/yogurtgo/chat"
 )
 
 // Storage handles persisting session data to disk.
@@ -84,6 +85,15 @@ func (s *Storage) SaveMeta(folder, title, summary string) error {
 	// Write summary.md
 	content := "# " + title + "\n\n" + summary + "\n"
 	return os.WriteFile(filepath.Join(folder, "summary.md"), []byte(content), 0644)
+}
+
+// SaveChat writes chat messages to chat.json in the session folder.
+func (s *Storage) SaveChat(folder string, msgs []chat.Message) error {
+	data, err := json.MarshalIndent(msgs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(folder, "chat.json"), data, 0644)
 }
 
 // ListSessions returns saved sessions newest-first.
