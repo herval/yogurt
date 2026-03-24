@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -107,12 +108,23 @@ type Model struct {
 	templates    []chat.Template
 	templateOpen bool
 	templateIdx  int
+
+	// delete confirmation
+	confirmDelete bool
+
+	// cached markdown renderer for chat pane (avoid per-render terminal queries)
+	mdRenderer *glamour.TermRenderer
 }
 
 func New(mgr *session.Manager, devices []audio.Device, cfg *config.Config, templates []chat.Template) *Model {
 	ti := textinput.New()
 	ti.Placeholder = "Ask about the transcript..."
 	ti.CharLimit = 500
+
+	// Initialize the markdown renderer once, before bubbletea takes over the
+	// terminal. WithAutoStyle() queries the terminal background color via OSC 11
+	// and can block for up to 5s once the TUI is running.
+	renderer, _ := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"))
 
 	return &Model{
 		mgr:        mgr,
@@ -124,6 +136,7 @@ func New(mgr *session.Manager, devices []audio.Device, cfg *config.Config, templ
 		chatModel:  cfg.ChatModel,
 		chatInput:  ti,
 		templates:  templates,
+		mdRenderer: renderer,
 	}
 }
 
@@ -162,6 +175,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Recreate the markdown renderer with the correct word-wrap width for
+		// the chat pane (60% of terminal width, minus borders).
+		chatInnerW := (msg.Width*60/100) - 6
+		if chatInnerW < 20 {
+			chatInnerW = 20
+		}
+		if r, err := glamour.NewTermRenderer(
+			glamour.WithStandardStyle("dark"),
+			glamour.WithWordWrap(chatInnerW),
+		); err == nil {
+			m.mdRenderer = r
+		}
 
 	case tickMsg:
 		if sess := m.mgr.CurrentSession(); sess != nil {
@@ -253,6 +278,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if m.confirmDelete {
+			return m.handleConfirmDeleteKey(msg)
+		}
 		if m.templateOpen {
 			return m.handleTemplateKey(msg)
 		}
@@ -270,15 +298,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.homeMode {
 		switch msg.String() {
 		case "up", "k":
-			if m.sessionIdx > 0 {
+			if m.viewingSession != nil {
+				m.scroll++
+			} else if m.sessionIdx > 0 {
 				m.sessionIdx--
 			}
-			m.viewingSession = nil
 		case "down", "j":
-			if m.sessionIdx < len(m.sessions)-1 {
+			if m.viewingSession != nil {
+				if m.scroll > 0 {
+					m.scroll--
+				}
+			} else if m.sessionIdx < len(m.sessions)-1 {
 				m.sessionIdx++
 			}
-			m.viewingSession = nil
 		case "enter":
 			if m.sessionIdx < len(m.sessions) {
 				s := m.sessions[m.sessionIdx]
@@ -316,6 +348,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.duration = "00:00:00"
 			m.notice = ""
 			return m, m.cmdStartSession()
+		case "d", "D":
+			if m.sessionIdx < len(m.sessions) && m.viewingSession == nil {
+				m.confirmDelete = true
+			}
 		case "q", "Q", "ctrl+c":
 			return m, tea.Quit
 		}
@@ -420,6 +456,95 @@ func (m *Model) handleTemplateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		m.confirmDelete = false
+		if m.sessionIdx < len(m.sessions) {
+			folder := m.sessions[m.sessionIdx].Folder
+			_ = os.RemoveAll(folder)
+			// Adjust index so it doesn't go out of bounds
+			if m.sessionIdx >= len(m.sessions)-1 && m.sessionIdx > 0 {
+				m.sessionIdx--
+			}
+		}
+		return m, m.cmdLoadSessions()
+	case "n", "N", "esc":
+		m.confirmDelete = false
+	}
+	return m, nil
+}
+
+func (m *Model) overlayConfirmDelete(base string) string {
+	if m.sessionIdx >= len(m.sessions) {
+		return base
+	}
+	name := m.sessions[m.sessionIdx].Title
+	if name == "" {
+		name = m.sessions[m.sessionIdx].Name
+	}
+	if name == "" {
+		name = "this recording"
+	}
+
+	label := `Delete "` + name + `"?`
+	hint := "  [Y]es  •  [N]o  "
+	// w = inner content width (what sits between │ and │, excluding the spaces)
+	w := len([]rune(label))
+	if hw := len([]rune(hint)); hw > w {
+		w = hw
+	}
+	// border dashes = inner width + 2 spaces (one each side)
+	border := strings.Repeat("─", w+2)
+	pad := func(s string) string {
+		r := []rune(s)
+		if len(r) < w {
+			s += strings.Repeat(" ", w-len(r))
+		}
+		return "│ " + s + " │"
+	}
+
+	modalLines := []string{
+		"┌" + border + "┐",
+		pad(label),
+		pad(""),
+		pad(hint),
+		"└" + border + "┘",
+	}
+
+	modalH := len(modalLines)
+	boxW := len([]rune(modalLines[0]))
+	startRow := (m.height - modalH) / 2
+	startCol := (m.width - boxW) / 2
+	if startRow < 0 {
+		startRow = 0
+	}
+	if startCol < 0 {
+		startCol = 0
+	}
+
+	baseLines := strings.Split(base, "\n")
+	for len(baseLines) < startRow+modalH {
+		baseLines = append(baseLines, "")
+	}
+	for i, ml := range modalLines {
+		row := startRow + i
+		if row >= len(baseLines) {
+			break
+		}
+		plain := stripANSI(baseLines[row])
+		runes := []rune(plain)
+		var left string
+		if startCol <= len(runes) {
+			left = string(runes[:startCol])
+		} else {
+			left = plain + strings.Repeat(" ", startCol-len(runes))
+		}
+		baseLines[row] = left + ml
+	}
+	return strings.Join(baseLines, "\n")
 }
 
 func (m *Model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -541,6 +666,9 @@ func (m *Model) View() string {
 
 	if m.templateOpen {
 		return m.overlayTemplateModal(base)
+	}
+	if m.confirmDelete {
+		return m.overlayConfirmDelete(base)
 	}
 
 	return base
@@ -666,11 +794,6 @@ func (m *Model) renderChatPane(width int) string {
 	}
 
 	// Build message lines
-	renderer, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(innerWidth-2),
-	)
-
 	var allLines []string
 	for _, msg := range m.chatMsgs {
 		if msg.Role == "user" {
@@ -681,8 +804,8 @@ func (m *Model) renderChatPane(width int) string {
 		} else {
 			allLines = append(allLines, aiStyle.Render("AI:"))
 			rendered := msg.Content
-			if renderer != nil {
-				if out, err := renderer.Render(msg.Content); err == nil {
+			if m.mdRenderer != nil {
+				if out, err := m.mdRenderer.Render(msg.Content); err == nil {
 					rendered = out
 				}
 			}
@@ -792,7 +915,6 @@ func (m *Model) renderControls() string {
 	} else {
 		parts = append(parts, "[C]hat")
 	}
-	parts = append(parts, "[Q]uit")
 	return "  " + strings.Join(parts, "  │  ")
 }
 
@@ -923,10 +1045,9 @@ func (m *Model) viewHome() string {
 		} else {
 			controls = append(controls, "[C]hat")
 		}
-		controls = append(controls, "[Q]uit")
 		b.WriteString("  " + strings.Join(controls, "  │  "))
 	} else {
-		b.WriteString("  " + strings.Join([]string{"↑/↓ Navigate", "[Enter] View", "[N]ew Session", "[Q]uit"}, "  │  "))
+		b.WriteString("  " + strings.Join([]string{"↑/↓ Navigate", "[Enter] View", "[N]ew Session", "[D]elete", "[Q]uit"}, "  │  "))
 	}
 
 	return b.String()
