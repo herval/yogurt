@@ -22,10 +22,10 @@ chat with the transcript using AI.
 ## Setup
 
 ```bash
-cd yogurtgo
+cd yogurt
 cp .env.example .env        # add your API keys
-go build -o yogurtgo
-./yogurtgo
+go build -o yogurt
+./yogurt
 ```
 
 Or use the run script which builds and runs in one step:
@@ -49,10 +49,10 @@ Or use the run script which builds and runs in one step:
 ## Usage
 
 ```bash
-./yogurtgo                        # start
-./yogurtgo --list-devices         # list audio input devices
-./yogurtgo --device 2             # use a specific device
-./yogurtgo --sessions-dir ~/meetings
+./yogurt                        # start
+./yogurt --list-devices         # list audio input devices
+./yogurt --device 2             # use a specific device
+./yogurt --sessions-dir ~/meetings
 ```
 
 ## Controls
