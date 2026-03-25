@@ -96,8 +96,9 @@ type Model struct {
 	viewTranscriptRaw string           // plain text used as chat context
 
 	// chat panel
-	openAIKey   string
-	chatModel   string
+	llmProvider string
+	llmAPIKey   string
+	llmModel    string
 	chatOpen    bool
 	chatInput   textinput.Model
 	chatMsgs    []chat.Message
@@ -132,8 +133,9 @@ func New(mgr *session.Manager, devices []audio.Device, cfg *config.Config, templ
 		status:     session.StatusIdle,
 		partialIdx: -1,
 		homeMode:   true,
-		openAIKey:  cfg.OpenAIKey,
-		chatModel:  cfg.ChatModel,
+		llmProvider: cfg.LLMProvider,
+		llmAPIKey:   cfg.LLMAPIKey,
+		llmModel:    cfg.LLMModel,
 		chatInput:  ti,
 		templates:  templates,
 		mdRenderer: renderer,
@@ -327,8 +329,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.viewingSession == nil {
 				return m, nil
 			}
-			if m.openAIKey == "" {
-				m.notice = "Set OPENAI_API_KEY to enable chat"
+			if m.llmAPIKey == "" {
+				m.notice = "Set LLM_MODEL and " + strings.ToUpper(m.llmProvider) + "_API_KEY to enable chat"
 				m.noticeErr = true
 				return m, nil
 			}
@@ -408,8 +410,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.micListIdx = 0
 		}
 	case "c", "C":
-		if m.openAIKey == "" {
-			m.notice = "Set OPENAI_API_KEY to enable chat"
+		if m.llmAPIKey == "" {
+			m.notice = "Set LLM_MODEL and " + strings.ToUpper(m.llmProvider) + "_API_KEY to enable chat"
 			m.noticeErr = true
 			return m, nil
 		}
@@ -613,10 +615,10 @@ func (m *Model) cmdFinish() tea.Cmd {
 }
 
 func (m *Model) cmdGenerateMeta(folder, transcript string) tea.Cmd {
-	if m.openAIKey == "" || transcript == "" {
+	if m.llmAPIKey == "" || transcript == "" {
 		return nil
 	}
-	client := chat.New(m.openAIKey, m.chatModel)
+	client := chat.New(m.llmProvider, m.llmAPIKey, m.llmModel)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
@@ -645,7 +647,7 @@ func (m *Model) cmdAsk(userMsg string) tea.Cmd {
 		"Answer concisely based on the transcript below. If the transcript is empty or the answer isn't there, say so.\n\n" +
 		"Transcript so far:\n" + transcript
 
-	client := chat.New(m.openAIKey, m.chatModel)
+	client := chat.New(m.llmProvider, m.llmAPIKey, m.llmModel)
 
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

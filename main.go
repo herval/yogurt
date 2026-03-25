@@ -59,8 +59,8 @@ func main() {
 		log.SetOutput(logFile)
 		defer logFile.Close()
 	}
-	log.Printf("starting yogurtgo (device=%d, sampleRate=%d, model=%s)",
-		cfg.AudioDevice, cfg.SampleRate, cfg.SpeechModel)
+	log.Printf("starting yogurt (device=%d, sampleRate=%d, stt=%s/%s, llm=%s/%s)",
+		cfg.AudioDevice, cfg.SampleRate, cfg.STTProvider, cfg.STTModel, cfg.LLMProvider, cfg.LLMModel)
 
 	// Request microphone permission (triggers dialog on first run)
 	ensurePermission()
@@ -68,11 +68,12 @@ func main() {
 	devices := audio.ListDevices()
 
 	mgr := session.NewManager(
-		cfg.APIKey,
+		cfg.STTProvider,
+		cfg.STTAPIKey,
 		cfg.SampleRate,
 		cfg.AudioDevice,
 		cfg.AbsSessionsDir(),
-		cfg.SpeechModel,
+		cfg.STTModel,
 	)
 
 	home, _ := os.UserHomeDir()

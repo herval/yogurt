@@ -16,8 +16,8 @@ chat with the transcript using AI.
 ## Requirements
 
 - macOS (uses AVFoundation for audio)
-- [AssemblyAI](https://www.assemblyai.com/) API key (transcription)
-- [OpenAI](https://platform.openai.com/) API key (chat, optional)
+- An STT provider API key (transcription) — AssemblyAI by default
+- An LLM provider API key (chat, optional)
 
 ## Setup
 
@@ -38,13 +38,35 @@ Or use the run script which builds and runs in one step:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ASSEMBLYAI_API_KEY` | Yes | — | AssemblyAI key for transcription |
-| `OPENAI_API_KEY` | No | — | OpenAI key for chat |
-| `OPENAI_MODEL` | No | `gpt-4o-mini` | OpenAI model to use |
+| `STT_MODEL` | Yes* | `assemblyai/universal-streaming-multilingual` | Speech-to-text provider/model |
+| `LLM_MODEL` | No | `openai/gpt-4o-mini` | LLM provider/model for chat |
+| `ASSEMBLYAI_API_KEY` | Yes* | — | AssemblyAI key (if using AssemblyAI) |
+| `ELEVENLABS_API_KEY` | — | — | ElevenLabs key (if using ElevenLabs) |
+| `OPENAI_API_KEY` | — | — | OpenAI key (if using OpenAI) |
+| `GEMINI_API_KEY` | — | — | Gemini key (if using Gemini) |
+| `ANTHROPIC_API_KEY` | — | — | Anthropic key (if using Anthropic) |
 | `YOGURT_SESSIONS_DIR` | No | `./sessions` | Where to save recordings |
-| `YOGURT_SPEECH_MODEL` | No | `universal-streaming-multilingual` | AssemblyAI speech model |
 | `YOGURT_SAMPLE_RATE` | No | `16000` | Audio sample rate |
 | `YOGURT_AUDIO_DEVICE` | No | default mic | Device index or name |
+
+\* Required for the configured STT provider. `ASSEMBLYAI_API_KEY` is required by default.
+
+### Supported providers
+
+**STT:** `assemblyai` (streaming, default), `elevenlabs` (batch), `whisper` (local, requires `-tags whisper` build)
+
+**LLM:** `openai` (default), `gemini`, `anthropic`
+
+**Examples:**
+```bash
+STT_MODEL=assemblyai/universal-streaming-multilingual  ASSEMBLYAI_API_KEY=...
+STT_MODEL=elevenlabs/scribe_v1                         ELEVENLABS_API_KEY=...
+STT_MODEL=whisper/base                                 # no key, local model
+
+LLM_MODEL=openai/gpt-4o-mini                           OPENAI_API_KEY=...
+LLM_MODEL=gemini/gemini-2.0-flash                      GEMINI_API_KEY=...
+LLM_MODEL=anthropic/claude-3-5-haiku-20241022          ANTHROPIC_API_KEY=...
+```
 
 ## Usage
 

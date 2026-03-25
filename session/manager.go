@@ -12,11 +12,12 @@ import (
 
 // Manager orchestrates audio capture, transcription, and session lifecycle.
 type Manager struct {
-	APIKey      string
+	STTProvider string
+	STTAPIKey   string
 	SampleRate  int
 	DeviceIndex int
 	SessionsDir string
-	SpeechModel string
+	STTModel    string
 
 	OnSegment    func(transcription.Segment)
 	OnStatus     func(Status)
@@ -26,20 +27,21 @@ type Manager struct {
 	mu         sync.Mutex
 	current    *Session
 	capture    *audio.Capture
-	client     *transcription.Client
+	client     transcription.STTClient
 	audioCh    chan []byte
 	audioBuf   []byte
 	stopStream chan struct{}
 	Storage    *Storage
 }
 
-func NewManager(apiKey string, sampleRate, deviceIndex int, sessionsDir, speechModel string) *Manager {
+func NewManager(sttProvider, sttAPIKey string, sampleRate, deviceIndex int, sessionsDir, sttModel string) *Manager {
 	return &Manager{
-		APIKey:      apiKey,
+		STTProvider: sttProvider,
+		STTAPIKey:   sttAPIKey,
 		SampleRate:  sampleRate,
 		DeviceIndex: deviceIndex,
 		SessionsDir: sessionsDir,
-		SpeechModel: speechModel,
+		STTModel:    sttModel,
 		Storage:     NewStorage(sessionsDir),
 	}
 }
@@ -73,11 +75,11 @@ func (m *Manager) StartSession(name string) error {
 	m.audioBuf = nil
 	m.mu.Unlock()
 
-	log.Printf("starting session: device=%d sampleRate=%d model=%s", m.DeviceIndex, m.SampleRate, m.SpeechModel)
+	log.Printf("starting session: device=%d sampleRate=%d stt=%s/%s",
+		m.DeviceIndex, m.SampleRate, m.STTProvider, m.STTModel)
 
-	// Start transcription client
-	client := transcription.NewClient(m.APIKey, m.SampleRate, m.SpeechModel)
-	client.OnSegment = func(seg transcription.Segment) {
+	client := transcription.NewSTTClient(m.STTProvider, m.STTAPIKey, m.SampleRate, m.STTModel)
+	client.SetOnSegment(func(seg transcription.Segment) {
 		log.Printf("segment: final=%v speaker=%s text=%q", seg.IsFinal, seg.Speaker, seg.Text)
 		m.mu.Lock()
 		if m.current != nil {
@@ -87,25 +89,25 @@ func (m *Manager) StartSession(name string) error {
 		if m.OnSegment != nil {
 			m.OnSegment(seg)
 		}
-	}
-	client.OnError = func(err error) {
+	})
+	client.SetOnError(func(err error) {
 		log.Printf("transcription error: %v", err)
 		if m.OnError != nil {
 			m.OnError(err)
 		}
-	}
-	client.OnConnected = func() {
-		log.Printf("connected to AssemblyAI")
-	}
-	client.OnDisconnect = func() {
-		log.Printf("disconnected from AssemblyAI")
-	}
+	})
+	client.SetOnConnected(func() {
+		log.Printf("connected to STT provider (%s)", m.STTProvider)
+	})
+	client.SetOnDisconnect(func() {
+		log.Printf("disconnected from STT provider (%s)", m.STTProvider)
+	})
 
 	if err := client.Connect(); err != nil {
 		m.mu.Lock()
 		m.current = nil
 		m.mu.Unlock()
-		return fmt.Errorf("connect to AssemblyAI: %w", err)
+		return fmt.Errorf("connect to STT (%s): %w", m.STTProvider, err)
 	}
 
 	m.mu.Lock()
@@ -133,19 +135,20 @@ func (m *Manager) StartSession(name string) error {
 	m.stopStream = stopStream
 	m.mu.Unlock()
 
-	// Stream audio to transcriber in background
 	go m.streamAudio(audioCh, client, stopStream)
 
 	m.notifyStatus(StatusRecording)
 	return nil
 }
 
-func (m *Manager) streamAudio(ch <-chan []byte, client *transcription.Client, stop <-chan struct{}) {
+func (m *Manager) streamAudio(ch <-chan []byte, client transcription.STTClient, stop <-chan struct{}) {
 	// AssemblyAI v3 requires 50–1000ms chunks. At 16kHz PCM16:
 	//   50ms  = 1600 bytes
 	//   100ms = 3200 bytes  ← target send size
-	const minSendBytes = 1600  // 50ms minimum
+	const minSendBytes = 1600    // 50ms minimum
 	const targetSendBytes = 3200 // 100ms target
+
+	_ = minSendBytes // used as documentation
 
 	var sendBuf []byte
 
@@ -183,7 +186,7 @@ func (m *Manager) streamAudio(ch <-chan []byte, client *transcription.Client, st
 			m.mu.Unlock()
 
 			if status == StatusPaused {
-				sendBuf = nil // discard buffered audio while paused
+				sendBuf = nil
 				if m.OnAudioLevel != nil {
 					m.OnAudioLevel(0)
 				}
@@ -194,12 +197,10 @@ func (m *Manager) streamAudio(ch <-chan []byte, client *transcription.Client, st
 				return
 			}
 
-			// Accumulate raw PCM for WAV file
 			m.mu.Lock()
 			m.audioBuf = append(m.audioBuf, data...)
 			m.mu.Unlock()
 
-			// Audio level from each incoming chunk
 			level := calcLevel(data)
 			if level == 0 {
 				silentChunks++
@@ -213,7 +214,6 @@ func (m *Manager) streamAudio(ch <-chan []byte, client *transcription.Client, st
 				m.OnAudioLevel(level)
 			}
 
-			// Buffer until we have enough for a valid API chunk
 			sendBuf = append(sendBuf, data...)
 			if len(sendBuf) >= targetSendBytes {
 				flush()

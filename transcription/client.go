@@ -32,7 +32,7 @@ type Client struct {
 	done        chan struct{}
 }
 
-func NewClient(apiKey string, sampleRate int, speechModel string) *Client {
+func NewAssemblyAIClient(apiKey string, sampleRate int, speechModel string) *Client {
 	return &Client{
 		apiKey:      apiKey,
 		sampleRate:  sampleRate,
@@ -40,6 +40,11 @@ func NewClient(apiKey string, sampleRate int, speechModel string) *Client {
 		done:        make(chan struct{}),
 	}
 }
+
+func (c *Client) SetOnSegment(fn func(Segment))    { c.OnSegment = fn }
+func (c *Client) SetOnError(fn func(error))         { c.OnError = fn }
+func (c *Client) SetOnConnected(fn func())           { c.OnConnected = fn }
+func (c *Client) SetOnDisconnect(fn func())          { c.OnDisconnect = fn }
 
 func (c *Client) Connect() error {
 	c.mu.Lock()
