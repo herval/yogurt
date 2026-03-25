@@ -321,7 +321,7 @@ func (m *Manager) Finish() (string, error) {
 // It is a headless alternative to StartSession+Finish for batch processing.
 // onProgress is called periodically with bytes sent so far (may be nil).
 func (m *Manager) TranscribeFile(name, filePath string, onProgress func(sent, total int)) (string, error) {
-	pcm, sampleRate, err := audio.ReadWAV(filePath)
+	pcm, sampleRate, err := audio.ReadAudioFile(filePath)
 	if err != nil {
 		return "", fmt.Errorf("read audio file: %w", err)
 	}

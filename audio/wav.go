@@ -5,7 +5,21 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 )
+
+// ReadAudioFile reads a WAV or MP3 file and returns PCM16 mono data and sample rate.
+func ReadAudioFile(path string) ([]byte, int, error) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".wav":
+		return ReadWAV(path)
+	case ".mp3":
+		return ReadMP3(path)
+	default:
+		return nil, 0, fmt.Errorf("unsupported audio format %q (supported: .wav, .mp3)", filepath.Ext(path))
+	}
+}
 
 // WriteWAV writes PCM16 mono audio to a WAV file.
 func WriteWAV(path string, pcm []byte, sampleRate int) error {

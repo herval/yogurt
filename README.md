@@ -89,7 +89,7 @@ No TUI is launched — results are printed to stdout and saved as a normal sessi
 ```
 
 The session name defaults to the filename without extension.
-The WAV file must be 16-bit PCM; stereo is automatically converted to mono.
+Supported formats: `.wav` (16-bit PCM), `.mp3`. Stereo is automatically converted to mono.
 
 ## Controls
 
