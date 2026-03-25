@@ -4,8 +4,10 @@ package transcription
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +107,13 @@ func (c *WhisperClient) Close() error {
 }
 
 func (c *WhisperClient) transcribe(pcm []byte) ([]Segment, error) {
+	// whisper.cpp requires CGo calls on the same OS thread
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	durSecs := float64(len(pcm)/2) / float64(c.sampleRate)
+	log.Printf("whisper: transcribing %.1f sec of audio (%d bytes)", durSecs, len(pcm))
+
 	model, err := whisper.New(c.modelPath)
 	if err != nil {
 		return nil, fmt.Errorf("load whisper model: %w", err)
@@ -117,9 +126,11 @@ func (c *WhisperClient) transcribe(pcm []byte) ([]Segment, error) {
 	}
 
 	samples := pcm16ToFloat32(pcm)
-	if err := ctx.Process(samples, nil, nil); err != nil {
+	log.Printf("whisper: calling Process on %d samples", len(samples))
+	if err := ctx.Process(samples, nil, nil, nil); err != nil {
 		return nil, fmt.Errorf("whisper process: %w", err)
 	}
+	log.Printf("whisper: Process complete, reading segments")
 
 	now := time.Now()
 	var segs []Segment

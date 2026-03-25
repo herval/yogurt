@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -20,6 +21,8 @@ func main() {
 	listDevices := flag.Bool("list-devices", false, "List available audio input devices and exit")
 	deviceFlag := flag.Int("device", -1, "Audio input device index (-1 = default)")
 	sessionsDirFlag := flag.String("sessions-dir", "", "Directory to save sessions (overrides YOGURT_SESSIONS_DIR)")
+	fileFlag := flag.String("file", "", "Path to a WAV file to transcribe (skips live recording)")
+	nameFlag := flag.String("name", "", "Session name (used with --file; defaults to filename)")
 	flag.Parse()
 
 	cfg := config.FromEnv()
@@ -53,6 +56,41 @@ func main() {
 		os.Exit(1)
 	}
 
+	mgr := session.NewManager(
+		cfg.STTProvider,
+		cfg.STTAPIKey,
+		cfg.SampleRate,
+		cfg.AudioDevice,
+		cfg.AbsSessionsDir(),
+		cfg.STTModel,
+	)
+
+	// --file mode: headless transcription, no TUI
+	if *fileFlag != "" {
+		log.SetOutput(os.Stderr)
+		name := *nameFlag
+		if name == "" {
+			base := filepath.Base(*fileFlag)
+			name = strings.TrimSuffix(base, filepath.Ext(base))
+		}
+		fmt.Printf("Transcribing %s as %q...\n", *fileFlag, name)
+
+		var lastPct int
+		folder, err := mgr.TranscribeFile(name, *fileFlag, func(sent, total int) {
+			pct := sent * 100 / total
+			if pct/10 != lastPct/10 {
+				lastPct = pct
+				fmt.Printf("  sending audio... %d%%\n", pct)
+			}
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		fmt.Println("Done. Session saved to:", folder)
+		return
+	}
+
 	// Log to file so output isn't swallowed by the TUI alt-screen
 	logFile, err := os.OpenFile("yogurt.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err == nil {
@@ -66,15 +104,6 @@ func main() {
 	ensurePermission()
 
 	devices := audio.ListDevices()
-
-	mgr := session.NewManager(
-		cfg.STTProvider,
-		cfg.STTAPIKey,
-		cfg.SampleRate,
-		cfg.AudioDevice,
-		cfg.AbsSessionsDir(),
-		cfg.STTModel,
-	)
 
 	home, _ := os.UserHomeDir()
 	templatesPath := filepath.Join(home, ".yogurt", "chat_templates.json")

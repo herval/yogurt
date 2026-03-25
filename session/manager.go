@@ -317,6 +317,84 @@ func (m *Manager) Finish() (string, error) {
 	return folder, nil
 }
 
+// TranscribeFile processes an audio file through the STT pipeline and saves a session.
+// It is a headless alternative to StartSession+Finish for batch processing.
+// onProgress is called periodically with bytes sent so far (may be nil).
+func (m *Manager) TranscribeFile(name, filePath string, onProgress func(sent, total int)) (string, error) {
+	pcm, sampleRate, err := audio.ReadWAV(filePath)
+	if err != nil {
+		return "", fmt.Errorf("read audio file: %w", err)
+	}
+
+	// Use the file's sample rate unless the manager was explicitly configured otherwise.
+	effectiveSampleRate := m.SampleRate
+	if effectiveSampleRate == 0 {
+		effectiveSampleRate = sampleRate
+	}
+
+	sess := NewSession(name)
+	sess.Status = StatusRecording
+
+	m.mu.Lock()
+	m.current = sess
+	m.audioBuf = pcm
+	m.mu.Unlock()
+
+	client := transcription.NewSTTClient(m.STTProvider, m.STTAPIKey, effectiveSampleRate, m.STTModel)
+	client.SetOnSegment(func(seg transcription.Segment) {
+		log.Printf("segment: final=%v speaker=%s text=%q", seg.IsFinal, seg.Speaker, seg.Text)
+		m.mu.Lock()
+		if m.current != nil {
+			m.current.Transcript.AddSegment(seg)
+		}
+		m.mu.Unlock()
+		if m.OnSegment != nil {
+			m.OnSegment(seg)
+		}
+	})
+	client.SetOnError(func(err error) {
+		log.Printf("transcription error: %v", err)
+		if m.OnError != nil {
+			m.OnError(err)
+		}
+	})
+	client.SetOnConnected(func() {
+		log.Printf("connected to STT provider (%s)", m.STTProvider)
+	})
+	client.SetOnDisconnect(func() {
+		log.Printf("disconnected from STT provider (%s)", m.STTProvider)
+	})
+
+	if err := client.Connect(); err != nil {
+		m.mu.Lock()
+		m.current = nil
+		m.audioBuf = nil
+		m.mu.Unlock()
+		return "", fmt.Errorf("connect to STT (%s): %w", m.STTProvider, err)
+	}
+
+	m.mu.Lock()
+	m.client = client
+	m.mu.Unlock()
+
+	// Stream audio in 100ms chunks (3200 bytes at 16kHz PCM16).
+	const chunkSize = 3200
+	for i := 0; i < len(pcm); i += chunkSize {
+		end := i + chunkSize
+		if end > len(pcm) {
+			end = len(pcm)
+		}
+		if err := client.SendAudio(pcm[i:end]); err != nil {
+			return "", fmt.Errorf("send audio: %w", err)
+		}
+		if onProgress != nil {
+			onProgress(end, len(pcm))
+		}
+	}
+
+	return m.Finish()
+}
+
 // Cancel cancels the current session without saving.
 func (m *Manager) Cancel() {
 	m.mu.Lock()

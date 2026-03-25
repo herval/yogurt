@@ -77,6 +77,20 @@ LLM_MODEL=anthropic/claude-3-5-haiku-20241022          ANTHROPIC_API_KEY=...
 ./yogurt --sessions-dir ~/meetings
 ```
 
+### Transcribe a file
+
+Pass `--file` to transcribe an existing WAV file instead of recording live.
+No TUI is launched — results are printed to stdout and saved as a normal session.
+
+```bash
+./yogurt --file recording.wav
+./yogurt --file recording.wav --name "team standup"
+./yogurt --file meeting.wav --sessions-dir ~/meetings
+```
+
+The session name defaults to the filename without extension.
+The WAV file must be 16-bit PCM; stereo is automatically converted to mono.
+
 ## Controls
 
 ### Session list
