@@ -114,10 +114,6 @@ impl SttClient for WhisperClient {
         (self.callbacks.on_disconnect)();
         result
     }
-
-    fn is_connected(&self) -> bool {
-        !*self.closed.lock().unwrap()
-    }
 }
 
 /// "path:/abs/model.bin" → literal path; otherwise ~/.yogurt/whisper/ggml-<model>.bin

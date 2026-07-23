@@ -218,7 +218,9 @@ impl Manager {
         Ok(Some(folder))
     }
 
-    /// Tear down without saving.
+    /// Tear down without saving. Not bound in the UI (Go parity) but part of
+    /// the session lifecycle API.
+    #[allow(dead_code)]
     pub fn cancel(&self) {
         let Some(active) = self.active.lock().unwrap().take() else {
             return;
@@ -227,15 +229,6 @@ impl Manager {
         let _ = active.streamer.join();
         let _ = active.client.lock().unwrap().close();
         self.emit(SessionEvent::Status(Status::Idle));
-    }
-
-    pub fn current_status(&self) -> Status {
-        self.active
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|a| a.session.lock().unwrap().status)
-            .unwrap_or(Status::Idle)
     }
 
     /// UI-facing snapshot of the live session.
@@ -248,7 +241,6 @@ impl Manager {
             word_count: sess.transcript.word_count(),
             speaker_count: sess.transcript.speakers().len(),
             plain_text: sess.transcript.to_plain_text(),
-            status: sess.status,
         })
     }
 
@@ -298,7 +290,6 @@ pub struct SessionSnapshot {
     pub word_count: usize,
     pub speaker_count: usize,
     pub plain_text: String,
-    pub status: Status,
 }
 
 fn stream_audio(

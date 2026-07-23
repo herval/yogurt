@@ -90,23 +90,11 @@ pub struct SttCallbacks {
     pub on_disconnect: Arc<dyn Fn() + Send + Sync>,
 }
 
-impl SttCallbacks {
-    pub fn noop() -> Self {
-        SttCallbacks {
-            on_segment: Arc::new(|_| {}),
-            on_error: Arc::new(|_| {}),
-            on_connected: Arc::new(|| {}),
-            on_disconnect: Arc::new(|| {}),
-        }
-    }
-}
-
 pub trait SttClient: Send {
     fn connect(&mut self) -> Result<()>;
     fn send_audio(&self, pcm: &[u8]) -> Result<()>;
     /// Blocking. Batch providers transcribe and fire on_segment here.
     fn close(&mut self) -> Result<()>;
-    fn is_connected(&self) -> bool;
 }
 
 pub fn new_stt_client(
@@ -139,8 +127,8 @@ fn new_whisper_client(sample_rate: u32, model: &str, cbs: SttCallbacks) -> Box<d
 }
 
 #[cfg(not(feature = "whisper"))]
-fn new_whisper_client(_sample_rate: u32, _model: &str, cbs: SttCallbacks) -> Box<dyn SttClient> {
-    struct WhisperStub(SttCallbacks);
+fn new_whisper_client(_sample_rate: u32, _model: &str, _cbs: SttCallbacks) -> Box<dyn SttClient> {
+    struct WhisperStub;
     impl SttClient for WhisperStub {
         fn connect(&mut self) -> Result<()> {
             anyhow::bail!("whisper support not compiled in; rebuild with --features whisper")
@@ -151,11 +139,8 @@ fn new_whisper_client(_sample_rate: u32, _model: &str, cbs: SttCallbacks) -> Box
         fn close(&mut self) -> Result<()> {
             Ok(())
         }
-        fn is_connected(&self) -> bool {
-            false
-        }
     }
-    Box::new(WhisperStub(cbs))
+    Box::new(WhisperStub)
 }
 
 /// "speaker_N" → letter 'A' + N%26; empty/unparseable → fallback.

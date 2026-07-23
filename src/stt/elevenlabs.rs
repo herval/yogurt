@@ -119,10 +119,6 @@ impl SttClient for ElevenLabsClient {
         (self.callbacks.on_disconnect)();
         result
     }
-
-    fn is_connected(&self) -> bool {
-        !*self.closed.lock().unwrap()
-    }
 }
 
 fn write_wav_bytes(out: &mut Vec<u8>, pcm: &[u8], sample_rate: u32) {

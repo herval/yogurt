@@ -100,10 +100,6 @@ impl SttClient for AssemblyAiClient {
         (self.callbacks.on_disconnect)();
         Ok(())
     }
-
-    fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::SeqCst)
-    }
 }
 
 type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
