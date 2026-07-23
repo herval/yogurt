@@ -30,6 +30,7 @@ pub struct ManagerConfig {
 struct Active {
     session: Arc<Mutex<Session>>,
     capture: Capture,
+    system_tap: Option<crate::audio::system_tap::SystemTap>,
     client: Arc<Mutex<Box<dyn SttClient>>>,
     audio_buf: Arc<Mutex<Vec<u8>>>,
     streamer: JoinHandle<()>,
@@ -148,7 +149,36 @@ impl Manager {
             .with_context(|| format!("connect to STT ({})", self.cfg.stt_provider))?;
 
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(512);
-        let capture = Capture::start(device, self.cfg.sample_rate, tx).map_err(|e| {
+
+        // System-audio tap (remote meeting participants), mixed with the mic.
+        // YOGURT_SYSTEM_AUDIO=0 disables; failure falls back to mic-only.
+        let system_audio_enabled = std::env::var("YOGURT_SYSTEM_AUDIO")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        let mut system_tap = None;
+        let mic_tx = if system_audio_enabled {
+            let (sys_tx, sys_rx) = mpsc::sync_channel::<Vec<u8>>(512);
+            match crate::audio::system_tap::SystemTap::start(self.cfg.sample_rate, sys_tx) {
+                Ok(tap) => {
+                    system_tap = Some(tap);
+                    let (mic_tx, mic_rx) = mpsc::sync_channel::<Vec<u8>>(512);
+                    crate::audio::mixer::spawn_mixer(mic_rx, sys_rx, tx.clone());
+                    log::info!("system audio tap active — mixing with mic");
+                    mic_tx
+                }
+                Err(e) => {
+                    log::warn!("system audio unavailable: {e:#}");
+                    self.emit(SessionEvent::Notice(format!(
+                        "System audio off (mic only): {e}"
+                    )));
+                    tx.clone()
+                }
+            }
+        } else {
+            tx.clone()
+        };
+
+        let capture = Capture::start(device, self.cfg.sample_rate, mic_tx).map_err(|e| {
             let _ = client.lock().unwrap().close();
             e
         })?;
@@ -165,6 +195,7 @@ impl Manager {
         *active = Some(Active {
             session,
             capture,
+            system_tap,
             client,
             audio_buf,
             streamer,
@@ -212,8 +243,10 @@ impl Manager {
         }
         self.emit(SessionEvent::Status(Status::Finished));
 
-        // Stopping capture drops the audio sender; the streamer flushes and exits.
+        // Stopping capture drops the audio sender; the mixer (if any) then the
+        // streamer drain and exit.
         drop(active.capture);
+        drop(active.system_tap);
         let _ = active.streamer.join();
 
         if let Err(e) = active.client.lock().unwrap().close() {
@@ -237,6 +270,7 @@ impl Manager {
             return;
         };
         drop(active.capture);
+        drop(active.system_tap);
         let _ = active.streamer.join();
         let _ = active.client.lock().unwrap().close();
         self.emit(SessionEvent::Status(Status::Idle));

@@ -8,8 +8,9 @@ __   __ ___   ____  _   _ ____  _____
 
 Real-time meeting recorder and transcriber for macOS.
 
-Records your microphone, transcribes with speaker detection, and lets you
-chat with the transcript using AI.
+Records your microphone plus system audio (so remote meeting participants
+are captured too), transcribes with speaker detection, and lets you chat
+with the transcript using AI.
 
 ---
 
@@ -49,6 +50,8 @@ builds and runs in one step.
 | `YOGURT_SESSIONS_DIR` | No | `./sessions` | Where to save recordings |
 | `YOGURT_SAMPLE_RATE` | No | `16000` | Audio sample rate |
 | `YOGURT_AUDIO_DEVICE` | No | default mic | Device index or name |
+| `YOGURT_SYSTEM_AUDIO` | No | `1` | Set `0` to record mic only (no system audio) |
+| `YOGURT_ELEVENLABS_LIVE_SECS` | No | `10` | Live transcription window for ElevenLabs (`0` = only on stop) |
 
 \* Required for the configured STT provider. `ASSEMBLYAI_API_KEY` is required by default.
 
@@ -76,6 +79,7 @@ LLM_MODEL=anthropic/claude-3-5-haiku-20241022          ANTHROPIC_API_KEY=...
 ./yogurt --list-devices         # list audio input devices
 ./yogurt --device 2             # use a specific device
 ./yogurt --mic-check            # record 2s and report the input level
+./yogurt --sys-check            # capture 3s of system audio and report the level
 ./yogurt --sessions-dir ~/meetings
 ```
 

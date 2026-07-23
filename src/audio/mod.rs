@@ -1,5 +1,7 @@
 pub mod capture;
 pub mod files;
+pub mod mixer;
+pub mod system_tap;
 pub mod wav;
 
 #[derive(Debug, Clone)]

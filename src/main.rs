@@ -42,6 +42,10 @@ struct Cli {
     /// Record 2 seconds from the mic and report the peak level, then exit
     #[arg(long)]
     mic_check: bool,
+
+    /// Capture 3 seconds of system audio and report the peak level, then exit
+    #[arg(long)]
+    sys_check: bool,
 }
 
 fn main() {
@@ -75,6 +79,14 @@ fn main() {
     if cli.mic_check {
         ensure_permission();
         if let Err(e) = mic_check(&cfg) {
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if cli.sys_check {
+        if let Err(e) = sys_check(&cfg) {
             eprintln!("Error: {e:#}");
             std::process::exit(1);
         }
@@ -184,6 +196,28 @@ fn mic_check(cfg: &Config) -> Result<()> {
     println!("Captured {bytes} bytes, peak level {peak:.2}");
     if bytes == 0 {
         anyhow::bail!("no audio captured — check mic permission and device");
+    }
+    Ok(())
+}
+
+fn sys_check(cfg: &Config) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(512);
+    let tap = audio::system_tap::SystemTap::start(cfg.sample_rate, tx)?;
+    println!("Capturing 3 seconds of system audio (play something!)...");
+    let start = Instant::now();
+    let mut bytes = 0usize;
+    let mut peak = 0.0f64;
+    while start.elapsed() < Duration::from_secs(3) {
+        if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+            bytes += chunk.len();
+            peak = peak.max(audio::calc_level(&chunk));
+        }
+    }
+    drop(tap);
+    println!("Captured {bytes} bytes of system audio, peak level {peak:.2}");
+    if bytes == 0 {
+        anyhow::bail!("no system audio captured — check the System Audio Recording permission");
     }
     Ok(())
 }

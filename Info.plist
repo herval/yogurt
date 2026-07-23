@@ -20,5 +20,7 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>yogurt records audio from your microphone to transcribe meetings.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>yogurt captures system audio so remote meeting participants are transcribed too.</string>
 </dict>
 </plist>
