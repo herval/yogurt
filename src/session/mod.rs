@@ -101,6 +101,8 @@ impl Session {
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     Segment(Segment),
+    /// Authoritative re-transcription replacing all segments so far.
+    Replace(Vec<Segment>),
     Status(Status),
     Error(String),
     AudioLevel(f64),

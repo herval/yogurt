@@ -73,7 +73,9 @@ impl Manager {
         // providers deliver during close(), when the session may no longer be
         // "active" — this ordering bug bit the Go version.
         let sess = Arc::clone(session);
+        let sess_replace = Arc::clone(session);
         let events = self.events.clone();
+        let events_replace = self.events.clone();
         let events_err = self.events.clone();
         let provider = self.cfg.stt_provider.clone();
         let provider2 = provider.clone();
@@ -87,6 +89,15 @@ impl Manager {
                 );
                 sess.lock().unwrap().transcript.add_segment(seg.clone());
                 let _ = events.send(SessionEvent::Segment(seg));
+            }),
+            on_replace: Arc::new(move |segments| {
+                log::info!("replacing transcript with {} authoritative segments", segments.len());
+                sess_replace
+                    .lock()
+                    .unwrap()
+                    .transcript
+                    .replace_segments(segments.clone());
+                let _ = events_replace.send(SessionEvent::Replace(segments));
             }),
             on_error: Arc::new(move |err| {
                 log::warn!("transcription error: {err}");

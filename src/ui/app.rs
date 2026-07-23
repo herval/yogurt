@@ -202,6 +202,13 @@ impl App {
                     self.partial_idx = Some(self.lines.len() - 1);
                 }
             }
+            SessionEvent::Replace(segments) => {
+                self.partial_idx = None;
+                self.lines = segments
+                    .into_iter()
+                    .map(|seg| TranscriptLine { seg, partial: false })
+                    .collect();
+            }
             SessionEvent::Status(s) => {
                 self.status = s;
                 match s {

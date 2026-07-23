@@ -44,6 +44,12 @@ impl Transcript {
         }
     }
 
+    /// Swap in an authoritative re-transcription (quasi-live batch providers).
+    pub fn replace_segments(&mut self, segments: Vec<Segment>) {
+        self.segments = segments;
+        self.partial = None;
+    }
+
     /// Space-counting heuristic — kept identical to Go so stored word counts match.
     pub fn word_count(&self) -> usize {
         self.segments
@@ -85,6 +91,10 @@ impl Transcript {
 #[derive(Clone)]
 pub struct SttCallbacks {
     pub on_segment: Arc<dyn Fn(Segment) + Send + Sync>,
+    /// Authoritative re-transcription replacing everything delivered so far
+    /// (used by quasi-live batch providers at close). Most providers never
+    /// call this.
+    pub on_replace: Arc<dyn Fn(Vec<Segment>) + Send + Sync>,
     pub on_error: Arc<dyn Fn(String) + Send + Sync>,
     pub on_connected: Arc<dyn Fn() + Send + Sync>,
     pub on_disconnect: Arc<dyn Fn() + Send + Sync>,
