@@ -123,7 +123,7 @@ func (c *ElevenLabsClient) transcribe(wavData []byte) ([]Segment, error) {
 	_ = w.WriteField("model_id", c.model)
 	_ = w.WriteField("diarize", "true")
 
-	part, err := w.CreateFormFile("audio", "audio.wav")
+	part, err := w.CreateFormFile("file", "audio.wav")
 	if err != nil {
 		return nil, err
 	}

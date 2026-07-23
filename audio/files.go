@@ -73,7 +73,7 @@ func readWAV(path string) ([]byte, int, error) {
 			var sr uint32
 			binary.Read(f, binary.LittleEndian, &sr)
 			sampleRate = int(sr)
-			f.Seek(4, io.SeekCurrent) // byte rate + block align
+			f.Seek(6, io.SeekCurrent) // byte rate (4) + block align (2)
 			var bps uint16
 			binary.Read(f, binary.LittleEndian, &bps)
 			bitsPerSample = int(bps)
