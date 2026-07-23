@@ -2,11 +2,17 @@ use anyhow::{Result, bail};
 use std::io::Write;
 use std::path::Path;
 
-/// Write mono PCM16 LE data as a canonical 44-byte-header WAV file.
-pub fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<()> {
+/// Write PCM16 LE data as a canonical 44-byte-header WAV file.
+pub fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32, channels: u16) -> Result<()> {
     let mut f = std::fs::File::create(path)?;
-    let data_len = pcm.len() as u32;
-    let byte_rate = sample_rate * 2; // mono, 16-bit
+    f.write_all(&wav_header(pcm.len() as u32, sample_rate, channels))?;
+    f.write_all(pcm)?;
+    Ok(())
+}
+
+pub fn wav_header(data_len: u32, sample_rate: u32, channels: u16) -> Vec<u8> {
+    let block_align = channels as u32 * 2;
+    let byte_rate = sample_rate * block_align;
     let mut header = Vec::with_capacity(44);
     header.extend_from_slice(b"RIFF");
     header.extend_from_slice(&(36 + data_len).to_le_bytes());
@@ -14,16 +20,14 @@ pub fn write_wav(path: &Path, pcm: &[u8], sample_rate: u32) -> Result<()> {
     header.extend_from_slice(b"fmt ");
     header.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
     header.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    header.extend_from_slice(&1u16.to_le_bytes()); // mono
+    header.extend_from_slice(&channels.to_le_bytes());
     header.extend_from_slice(&sample_rate.to_le_bytes());
     header.extend_from_slice(&byte_rate.to_le_bytes());
-    header.extend_from_slice(&2u16.to_le_bytes()); // block align
+    header.extend_from_slice(&(block_align as u16).to_le_bytes());
     header.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
     header.extend_from_slice(b"data");
     header.extend_from_slice(&data_len.to_le_bytes());
-    f.write_all(&header)?;
-    f.write_all(pcm)?;
-    Ok(())
+    header
 }
 
 /// Parse a WAV file into (interleaved PCM16 LE, sample_rate, channels).

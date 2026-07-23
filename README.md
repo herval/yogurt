@@ -10,7 +10,10 @@ Real-time meeting recorder and transcriber for macOS.
 
 Records your microphone plus system audio (so remote meeting participants
 are captured too), transcribes with speaker detection, and lets you chat
-with the transcript using AI.
+with the transcript using AI. With ElevenLabs, recordings are stereo — your
+mic on the left, the meeting on the right — so the transcript labels your
+lines as "You" and remote speech by channel. Mono providers (AssemblyAI,
+whisper) get a mixed-down stream with acoustic diarization instead.
 
 ---
 

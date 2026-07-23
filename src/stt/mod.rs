@@ -74,6 +74,8 @@ impl Transcript {
         for s in &self.segments {
             let speaker = if s.speaker.is_empty() {
                 "Unknown".to_string()
+            } else if s.speaker == "You" {
+                "You".to_string()
             } else {
                 format!("Speaker {}", s.speaker)
             };
@@ -111,6 +113,7 @@ pub fn new_stt_client(
     provider: &str,
     api_key: &str,
     sample_rate: u32,
+    channels: u16,
     model: &str,
     callbacks: SttCallbacks,
 ) -> Box<dyn SttClient> {
@@ -118,6 +121,7 @@ pub fn new_stt_client(
         "elevenlabs" => Box::new(elevenlabs::ElevenLabsClient::new(
             api_key,
             sample_rate,
+            channels,
             model,
             callbacks,
         )),
@@ -157,9 +161,17 @@ fn new_whisper_client(_sample_rate: u32, _model: &str, _cbs: SttCallbacks) -> Bo
 pub fn speaker_letter(speaker_id: &str, fallback: char) -> String {
     if let Some(n) = speaker_id.strip_prefix("speaker_").and_then(|s| s.parse::<u32>().ok()) {
         char::from(b'A' + (n % 26) as u8).to_string()
-    } else if speaker_id.is_empty() {
-        fallback.to_string()
     } else {
         fallback.to_string()
+    }
+}
+
+/// Channel-separated recordings: channel 0 is the local mic ("You"),
+/// channel N≥1 becomes Speaker A/B/...
+pub fn channel_speaker(speaker_id: &str) -> String {
+    match speaker_id.strip_prefix("speaker_").and_then(|s| s.parse::<u32>().ok()) {
+        Some(0) => "You".to_string(),
+        Some(n) => char::from(b'A' + ((n - 1) % 26) as u8).to_string(),
+        None => "A".to_string(),
     }
 }

@@ -15,7 +15,7 @@ use anyhow::{Result, bail};
 use chrono::Local;
 use serde::Deserialize;
 
-use super::{Segment, SttCallbacks, SttClient, speaker_letter};
+use super::{Segment, SttCallbacks, SttClient, channel_speaker, speaker_letter};
 
 const STT_URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
 const DEFAULT_LIVE_SECS: u64 = 10;
@@ -25,6 +25,7 @@ const MIN_WINDOW_SECS: usize = 2;
 pub struct ElevenLabsClient {
     api: Arc<Api>,
     sample_rate: u32,
+    channels: u16,
     callbacks: SttCallbacks,
     audio_buf: Arc<Mutex<Vec<u8>>>,
     closed: Mutex<bool>,
@@ -35,6 +36,8 @@ pub struct ElevenLabsClient {
 struct Api {
     api_key: String,
     model: String,
+    /// >1 → per-channel transcription (channel 0 = local mic = "You").
+    channels: u16,
 }
 
 struct LiveState {
@@ -48,7 +51,13 @@ struct LiveState {
 }
 
 impl ElevenLabsClient {
-    pub fn new(api_key: &str, sample_rate: u32, model: &str, callbacks: SttCallbacks) -> Self {
+    pub fn new(
+        api_key: &str,
+        sample_rate: u32,
+        channels: u16,
+        model: &str,
+        callbacks: SttCallbacks,
+    ) -> Self {
         let live_secs = std::env::var("YOGURT_ELEVENLABS_LIVE_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -64,8 +73,10 @@ impl ElevenLabsClient {
             api: Arc::new(Api {
                 api_key: api_key.to_string(),
                 model: if model.is_empty() { "scribe_v1".into() } else { model.into() },
+                channels,
             }),
             sample_rate,
+            channels,
             callbacks,
             audio_buf: Arc::new(Mutex::new(Vec::new())),
             closed: Mutex::new(false),
@@ -92,7 +103,8 @@ impl ElevenLabsClient {
         let start = live.consumed.load(Ordering::SeqCst);
         let window: Vec<u8> = {
             let buf = self.audio_buf.lock().unwrap();
-            if buf.len().saturating_sub(start) < MIN_WINDOW_SECS * self.sample_rate as usize * 2 {
+            let min_bytes = MIN_WINDOW_SECS * self.sample_rate as usize * 2 * self.channels as usize;
+            if buf.len().saturating_sub(start) < min_bytes {
                 live.in_flight.store(false, Ordering::SeqCst);
                 return;
             }
@@ -103,11 +115,12 @@ impl ElevenLabsClient {
         let api = Arc::clone(&self.api);
         let callbacks = self.callbacks.clone();
         let sample_rate = self.sample_rate;
+        let channels = self.channels;
         let in_flight = Arc::clone(&live.in_flight);
         let delivered = Arc::clone(&live.delivered);
-        let offset_secs = start as f64 / (sample_rate as f64 * 2.0);
+        let offset_secs = start as f64 / (sample_rate as f64 * 2.0 * channels as f64);
         std::thread::spawn(move || {
-            let wav = wav_bytes(&window, sample_rate);
+            let wav = wav_bytes(&window, sample_rate, channels);
             match api.transcribe(&wav) {
                 Ok(segments) => {
                     for mut seg in segments {
@@ -157,7 +170,7 @@ impl SttClient for ElevenLabsClient {
             if buf.is_empty() {
                 return Ok(());
             }
-            let wav = wav_bytes(&buf, self.sample_rate);
+            let wav = wav_bytes(&buf, self.sample_rate, self.channels);
             let segments = self.api.transcribe(&wav)?;
             let live_delivered = self
                 .live
@@ -195,7 +208,12 @@ impl Api {
             );
         };
         field("model_id", &self.model);
-        field("diarize", "true");
+        if self.channels > 1 {
+            field("use_multi_channel", "true");
+            field("multichannel_output_style", "combined");
+        } else {
+            field("diarize", "true");
+        }
         body.extend_from_slice(
             format!(
                 "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
@@ -225,26 +243,13 @@ impl Api {
         }
         let parsed: ElevenLabsResponse = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("parse elevenlabs response: {e}"))?;
-        Ok(to_segments(parsed))
+        Ok(to_segments(parsed, self.channels > 1))
     }
 }
 
-fn wav_bytes(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(pcm.len() + 44);
-    let data_len = pcm.len() as u32;
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_len).to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    out.extend_from_slice(&2u16.to_le_bytes());
-    out.extend_from_slice(&16u16.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_len.to_le_bytes());
+fn wav_bytes(pcm: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
+    let mut out = crate::audio::wav::wav_header(pcm.len() as u32, sample_rate, channels);
+    out.reserve(pcm.len());
     out.extend_from_slice(pcm);
     out
 }
@@ -271,8 +276,26 @@ struct ElWord {
     speaker_id: String,
 }
 
-/// Group consecutive words by speaker into segments.
-fn to_segments(resp: ElevenLabsResponse) -> Vec<Segment> {
+/// Longest silence within one speaker's utterance before we split segments.
+const MAX_UTTERANCE_GAP_SECS: f64 = 2.0;
+
+/// Group words into per-speaker utterance segments.
+///
+/// Mono + diarization: words arrive sequentially, group consecutive runs.
+/// Multichannel: words from different channels interleave in time, so group
+/// each speaker's words separately (splitting on silence gaps) and sort the
+/// resulting segments by start time.
+fn to_segments(resp: ElevenLabsResponse, multichannel: bool) -> Vec<Segment> {
+    let label = move |speaker_id: &str| {
+        if multichannel {
+            channel_speaker(speaker_id)
+        } else {
+            speaker_letter(speaker_id, 'A')
+        }
+    };
+    if multichannel {
+        return to_segments_by_speaker(resp, label);
+    }
     let words: Vec<&ElWord> = resp.words.iter().filter(|w| w.kind == "word").collect();
     if words.is_empty() {
         if resp.text.is_empty() {
@@ -298,7 +321,7 @@ fn to_segments(resp: ElevenLabsResponse) -> Vec<Segment> {
         let texts: Vec<&str> = group.iter().map(|w| w.text.as_str()).collect();
         segments.push(Segment {
             text: texts.join(" "),
-            speaker: speaker_letter(&group[0].speaker_id, 'A'),
+            speaker: label(&group[0].speaker_id),
             start_time: group[0].start,
             end_time: group.last().unwrap().end,
             confidence: 1.0,
@@ -317,5 +340,58 @@ fn to_segments(resp: ElevenLabsResponse) -> Vec<Segment> {
         group.push(w);
     }
     flush(&mut group, &mut segments);
+    segments
+}
+
+fn to_segments_by_speaker(
+    resp: ElevenLabsResponse,
+    label: impl Fn(&str) -> String,
+) -> Vec<Segment> {
+    let words: Vec<&ElWord> = resp.words.iter().filter(|w| w.kind == "word").collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    // Partition into per-speaker word streams, preserving order.
+    let mut speakers: Vec<(&str, Vec<&ElWord>)> = Vec::new();
+    for w in words {
+        match speakers.iter_mut().find(|(id, _)| *id == w.speaker_id) {
+            Some((_, list)) => list.push(w),
+            None => speakers.push((w.speaker_id.as_str(), vec![w])),
+        }
+    }
+
+    let mut segments = Vec::new();
+    for (speaker_id, list) in speakers {
+        let speaker = label(speaker_id);
+        let mut group: Vec<&ElWord> = Vec::new();
+        let flush = |group: &mut Vec<&ElWord>, segments: &mut Vec<Segment>| {
+            if group.is_empty() {
+                return;
+            }
+            let texts: Vec<&str> = group.iter().map(|w| w.text.as_str()).collect();
+            segments.push(Segment {
+                text: texts.join(" "),
+                speaker: speaker.clone(),
+                start_time: group[0].start,
+                end_time: group.last().unwrap().end,
+                confidence: 1.0,
+                is_final: true,
+                created_at: Local::now(),
+            });
+            group.clear();
+        };
+        for w in list {
+            if let Some(prev) = group.last() {
+                if w.start - prev.end > MAX_UTTERANCE_GAP_SECS {
+                    flush(&mut group, &mut segments);
+                }
+            }
+            group.push(w);
+        }
+        flush(&mut group, &mut segments);
+    }
+
+    segments.sort_by(|a, b| a.start_time.total_cmp(&b.start_time));
     segments
 }

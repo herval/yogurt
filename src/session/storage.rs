@@ -20,11 +20,11 @@ impl Storage {
     }
 
     /// Write the full session folder. Returns the folder path.
-    pub fn save(&self, sess: &Session, pcm: &[u8], sample_rate: u32) -> Result<PathBuf> {
+    pub fn save(&self, sess: &Session, pcm: &[u8], sample_rate: u32, channels: u16) -> Result<PathBuf> {
         let folder = self.base_dir.join(sess.folder_name());
         fs::create_dir_all(&folder).context("create session folder")?;
 
-        write_wav(&folder.join("audio.wav"), pcm, sample_rate)?;
+        write_wav(&folder.join("audio.wav"), pcm, sample_rate, channels)?;
         fs::write(folder.join("transcript.txt"), sess.transcript.to_plain_text())?;
 
         #[derive(serde::Serialize)]

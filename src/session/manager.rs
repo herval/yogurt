@@ -34,6 +34,7 @@ struct Active {
     client: Arc<Mutex<Box<dyn SttClient>>>,
     audio_buf: Arc<Mutex<Vec<u8>>>,
     streamer: JoinHandle<()>,
+    channels: u16,
 }
 
 pub struct Manager {
@@ -68,6 +69,7 @@ impl Manager {
     fn make_client(
         &self,
         sample_rate: u32,
+        channels: u16,
         session: &Arc<Mutex<Session>>,
     ) -> Arc<Mutex<Box<dyn SttClient>>> {
         // Segment callbacks append to the captured session directly: batch
@@ -115,6 +117,7 @@ impl Manager {
             &self.cfg.stt_provider,
             &self.cfg.stt_api_key,
             sample_rate,
+            channels,
             &self.cfg.stt_model,
             callbacks,
         )))
@@ -141,29 +144,32 @@ impl Manager {
         session.status = Status::Recording;
         let session = Arc::new(Mutex::new(session));
 
-        let client = self.make_client(self.cfg.sample_rate, &session);
-        client
-            .lock()
-            .unwrap()
-            .connect()
-            .with_context(|| format!("connect to STT ({})", self.cfg.stt_provider))?;
-
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(512);
 
-        // System-audio tap (remote meeting participants), mixed with the mic.
-        // YOGURT_SYSTEM_AUDIO=0 disables; failure falls back to mic-only.
+        // System-audio tap (remote meeting participants). With ElevenLabs the
+        // streams stay on separate stereo channels (mic=L, system=R) so the
+        // provider attributes speakers by channel; mono-only providers get a
+        // summed mix. YOGURT_SYSTEM_AUDIO=0 disables; failure → mic-only.
         let system_audio_enabled = std::env::var("YOGURT_SYSTEM_AUDIO")
             .map(|v| v != "0")
             .unwrap_or(true);
+        let stereo_capable = self.cfg.stt_provider == "elevenlabs";
         let mut system_tap = None;
+        let mut channels: u16 = 1;
         let mic_tx = if system_audio_enabled {
             let (sys_tx, sys_rx) = mpsc::sync_channel::<Vec<u8>>(512);
             match crate::audio::system_tap::SystemTap::start(self.cfg.sample_rate, sys_tx) {
                 Ok(tap) => {
                     system_tap = Some(tap);
                     let (mic_tx, mic_rx) = mpsc::sync_channel::<Vec<u8>>(512);
-                    crate::audio::mixer::spawn_mixer(mic_rx, sys_rx, tx.clone());
-                    log::info!("system audio tap active — mixing with mic");
+                    if stereo_capable {
+                        channels = 2;
+                        crate::audio::mixer::spawn_interleaver(mic_rx, sys_rx, tx.clone());
+                        log::info!("system audio tap active — stereo (mic=L, system=R)");
+                    } else {
+                        crate::audio::mixer::spawn_mixer(mic_rx, sys_rx, tx.clone());
+                        log::info!("system audio tap active — mixing with mic (mono provider)");
+                    }
                     mic_tx
                 }
                 Err(e) => {
@@ -177,6 +183,13 @@ impl Manager {
         } else {
             tx.clone()
         };
+
+        let client = self.make_client(self.cfg.sample_rate, channels, &session);
+        client
+            .lock()
+            .unwrap()
+            .connect()
+            .with_context(|| format!("connect to STT ({})", self.cfg.stt_provider))?;
 
         let capture = Capture::start(device, self.cfg.sample_rate, mic_tx).map_err(|e| {
             let _ = client.lock().unwrap().close();
@@ -199,6 +212,7 @@ impl Manager {
             client,
             audio_buf,
             streamer,
+            channels,
         });
         self.emit(SessionEvent::Status(Status::Recording));
         Ok(())
@@ -258,7 +272,7 @@ impl Manager {
         if buf.is_empty() && sess.transcript.segments.is_empty() {
             return Ok(None);
         }
-        let folder = self.storage.save(&sess, &buf, self.cfg.sample_rate)?;
+        let folder = self.storage.save(&sess, &buf, self.cfg.sample_rate, active.channels)?;
         Ok(Some(folder))
     }
 
@@ -304,7 +318,7 @@ impl Manager {
 
         // Declare the file's real sample rate to the STT provider (the Go
         // version wrongly declared the configured mic rate).
-        let client = self.make_client(file_rate, &session);
+        let client = self.make_client(file_rate, 1, &session);
         client
             .lock()
             .unwrap()
@@ -326,7 +340,7 @@ impl Manager {
             sess.end_time = Some(Local::now());
         }
         let sess = session.lock().unwrap();
-        self.storage.save(&sess, &pcm, file_rate)
+        self.storage.save(&sess, &pcm, file_rate, 1)
     }
 }
 
