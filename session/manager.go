@@ -81,10 +81,10 @@ func (m *Manager) StartSession(name string) error {
 	client := transcription.NewSTTClient(m.STTProvider, m.STTAPIKey, m.SampleRate, m.STTModel)
 	client.SetOnSegment(func(seg transcription.Segment) {
 		log.Printf("segment: final=%v speaker=%s text=%q", seg.IsFinal, seg.Speaker, seg.Text)
+		// Append to sess (not m.current): batch providers deliver segments
+		// during Close(), by which point m.current may already be nil.
 		m.mu.Lock()
-		if m.current != nil {
-			m.current.Transcript.AddSegment(seg)
-		}
+		sess.Transcript.AddSegment(seg)
 		m.mu.Unlock()
 		if m.OnSegment != nil {
 			m.OnSegment(seg)
@@ -286,11 +286,9 @@ func (m *Manager) Finish() (string, error) {
 	stop := m.stopStream
 	cap := m.capture
 	client := m.client
-	buf := m.audioBuf
 	m.current = nil
 	m.capture = nil
 	m.client = nil
-	m.audioBuf = nil
 	m.stopStream = nil
 	m.mu.Unlock()
 
@@ -302,9 +300,16 @@ func (m *Manager) Finish() (string, error) {
 	if cap != nil {
 		cap.Stop()
 	}
+	// Close before saving: batch providers (elevenlabs) transcribe the whole
+	// recording here and deliver their segments synchronously.
 	if client != nil {
 		_ = client.Close()
 	}
+
+	m.mu.Lock()
+	buf := m.audioBuf
+	m.audioBuf = nil
+	m.mu.Unlock()
 
 	var folder string
 	if len(buf) > 0 || len(sess.Transcript.Segments) > 0 {
@@ -344,9 +349,7 @@ func (m *Manager) TranscribeFile(name, filePath string, onProgress func(sent, to
 	client.SetOnSegment(func(seg transcription.Segment) {
 		log.Printf("segment: final=%v speaker=%s text=%q", seg.IsFinal, seg.Speaker, seg.Text)
 		m.mu.Lock()
-		if m.current != nil {
-			m.current.Transcript.AddSegment(seg)
-		}
+		sess.Transcript.AddSegment(seg)
 		m.mu.Unlock()
 		if m.OnSegment != nil {
 			m.OnSegment(seg)
