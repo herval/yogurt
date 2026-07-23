@@ -108,7 +108,11 @@ impl ElevenLabsClient {
                 live.in_flight.store(false, Ordering::SeqCst);
                 return;
             }
-            buf[start..].to_vec()
+            // Cut at a silence near the end rather than mid-word: the words
+            // the fixed boundary would split stay whole for the next window.
+            let pending = &buf[start..];
+            let cut = silence_cut_point(pending, self.sample_rate, self.channels);
+            pending[..cut].to_vec()
         };
         live.consumed.store(start + window.len(), Ordering::SeqCst);
 
@@ -121,7 +125,7 @@ impl ElevenLabsClient {
         let offset_secs = start as f64 / (sample_rate as f64 * 2.0 * channels as f64);
         std::thread::spawn(move || {
             let wav = wav_bytes(&window, sample_rate, channels);
-            match api.transcribe(&wav) {
+            match api.transcribe(&wav, Duration::from_secs(120)) {
                 Ok(segments) => {
                     for mut seg in segments {
                         seg.start_time += offset_secs;
@@ -171,7 +175,9 @@ impl SttClient for ElevenLabsClient {
                 return Ok(());
             }
             let wav = wav_bytes(&buf, self.sample_rate, self.channels);
-            let segments = self.api.transcribe(&wav)?;
+            // The full-recording upload can be hundreds of MB for long
+            // meetings — give it far more headroom than the live windows.
+            let segments = self.api.transcribe(&wav, Duration::from_secs(900))?;
             let live_delivered = self
                 .live
                 .as_ref()
@@ -196,7 +202,7 @@ impl SttClient for ElevenLabsClient {
 }
 
 impl Api {
-    fn transcribe(&self, wav: &[u8]) -> Result<Vec<Segment>> {
+    fn transcribe(&self, wav: &[u8], timeout: Duration) -> Result<Vec<Segment>> {
         let boundary = "----yogurt-multipart-boundary";
         let mut body: Vec<u8> = Vec::with_capacity(wav.len() + 512);
         let mut field = |name: &str, value: &str| {
@@ -224,7 +230,7 @@ impl Api {
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(120)))
+            .timeout_global(Some(timeout))
             .http_status_as_error(false)
             .build()
             .into();
@@ -245,6 +251,48 @@ impl Api {
             .map_err(|e| anyhow::anyhow!("parse elevenlabs response: {e}"))?;
         Ok(to_segments(parsed, self.channels > 1))
     }
+}
+
+/// Find a frame-aligned cut point at the quietest spot in the final seconds
+/// of the pending audio, so live windows don't slice words in half. Falls
+/// back to the full length when speech is continuous.
+fn silence_cut_point(pcm: &[u8], sample_rate: u32, channels: u16) -> usize {
+    const FRAME_MS: usize = 20;
+    const SEARCH_SECS: usize = 4;
+    const QUIET_SPAN_FRAMES: usize = 10; // 200ms of quiet counts as a gap
+    const QUIET_PEAK: i32 = 800; // ~2.4% of full scale
+
+    let bytes_per_frame = (sample_rate as usize / 1000) * FRAME_MS * 2 * channels as usize;
+    if bytes_per_frame == 0 || pcm.len() < bytes_per_frame * QUIET_SPAN_FRAMES {
+        return pcm.len();
+    }
+    let total_frames = pcm.len() / bytes_per_frame;
+    let search_frames = (SEARCH_SECS * 1000 / FRAME_MS).min(total_frames);
+    let first_frame = total_frames - search_frames;
+
+    let frame_peak = |i: usize| -> i32 {
+        let sl = &pcm[i * bytes_per_frame..(i + 1) * bytes_per_frame];
+        sl.chunks_exact(2)
+            .map(|c| (i16::from_le_bytes([c[0], c[1]]) as i32).abs())
+            .max()
+            .unwrap_or(0)
+    };
+
+    // Latest run of QUIET_SPAN_FRAMES consecutive quiet frames wins.
+    let mut best_cut = None;
+    let mut run = 0usize;
+    for i in first_frame..total_frames {
+        if frame_peak(i) < QUIET_PEAK {
+            run += 1;
+            if run >= QUIET_SPAN_FRAMES {
+                // Cut in the middle of the quiet run.
+                best_cut = Some((i + 1 - run / 2) * bytes_per_frame);
+            }
+        } else {
+            run = 0;
+        }
+    }
+    best_cut.unwrap_or(pcm.len())
 }
 
 fn wav_bytes(pcm: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
@@ -394,4 +442,38 @@ fn to_segments_by_speaker(
 
     segments.sort_by(|a, b| a.start_time.total_cmp(&b.start_time));
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::silence_cut_point;
+
+    fn tone(frames_ms: usize, amp: i16, rate: u32) -> Vec<u8> {
+        let samples = rate as usize / 1000 * frames_ms;
+        let mut out = Vec::with_capacity(samples * 2);
+        for i in 0..samples {
+            let v = if i % 2 == 0 { amp } else { -amp };
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn cuts_at_trailing_silence() {
+        let rate = 16000;
+        let mut pcm = tone(9000, 8000, rate); // 9s loud speech
+        let silence_start = pcm.len();
+        pcm.extend(tone(500, 0, rate)); // 0.5s silence
+        pcm.extend(tone(500, 8000, rate)); // 0.5s speech again
+        let cut = silence_cut_point(&pcm, rate, 1);
+        assert!(cut > silence_start && cut < silence_start + rate as usize, "cut {cut} not inside silence at {silence_start}");
+        assert_eq!(cut % 2, 0);
+    }
+
+    #[test]
+    fn continuous_speech_keeps_everything() {
+        let rate = 16000;
+        let pcm = tone(10000, 8000, rate);
+        assert_eq!(silence_cut_point(&pcm, rate, 1), pcm.len());
+    }
 }
