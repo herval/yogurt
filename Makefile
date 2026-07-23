@@ -18,6 +18,9 @@ setup: ## Download the whisper model and build with whisper support (MODEL=base)
 	./setup-whisper.sh $(MODEL)
 
 build: ## Build yogurt.app bundle (required for mic permission) + ./yogurt symlink
+	@if pgrep -qf "yogurt.app/Contents/MacOS/yogurt"; then \
+		echo "ERROR: yogurt is running — quit it first (replacing the binary kills it)"; exit 1; \
+	fi
 	cargo build $(CARGO_FLAGS)
 	mkdir -p yogurt.app/Contents/MacOS
 	cp Info.plist yogurt.app/Contents/Info.plist

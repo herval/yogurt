@@ -43,6 +43,10 @@ struct Cli {
     #[arg(long)]
     mic_check: bool,
 
+    /// Transcribe and save recordings recovered from a crash, then exit
+    #[arg(long)]
+    recover: bool,
+
     /// Capture 3 seconds of system audio and report the peak level, then exit
     #[arg(long)]
     sys_check: bool,
@@ -102,6 +106,7 @@ fn main() {
     }
 
     let (events_tx, events_rx) = mpsc::channel::<SessionEvent>();
+    let notice_tx = events_tx.clone();
     let mgr = Manager::new(
         ManagerConfig {
             stt_provider: cfg.stt_provider.clone(),
@@ -113,6 +118,37 @@ fn main() {
         },
         events_tx,
     );
+
+    // Headless crash recovery
+    if cli.recover {
+        init_stderr_logging();
+        std::thread::spawn(move || {
+            for ev in events_rx {
+                if let SessionEvent::Error(e) | SessionEvent::Notice(e) = ev {
+                    eprintln!("{e}");
+                }
+            }
+        });
+        let results = mgr.recover_spools();
+        if results.is_empty() {
+            println!("No crashed recordings found.");
+            return;
+        }
+        let mut failed = false;
+        for (id, outcome) in results {
+            match outcome {
+                Ok(folder) => println!("Recovered {id} -> {}", folder.display()),
+                Err(e) => {
+                    failed = true;
+                    eprintln!("Failed to recover {id}: {e:#}");
+                }
+            }
+        }
+        if failed {
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Headless --file mode
     if let Some(file) = &cli.file {
@@ -165,6 +201,13 @@ fn main() {
 
     ensure_permission();
     let devices = audio::capture::list_devices();
+
+    let pending = mgr.pending_spools();
+    if pending > 0 {
+        let _ = notice_tx.send(SessionEvent::Notice(format!(
+            "{pending} crashed recording(s) found — run: yogurt --recover"
+        )));
+    }
 
     let templates_path = dirs::home_dir()
         .unwrap_or_default()

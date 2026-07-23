@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -29,6 +30,7 @@ pub struct ManagerConfig {
 
 struct Active {
     session: Arc<Mutex<Session>>,
+    spool_dir: PathBuf,
     capture: Capture,
     system_tap: Option<crate::audio::system_tap::SystemTap>,
     client: Arc<Mutex<Box<dyn SttClient>>>,
@@ -196,17 +198,40 @@ impl Manager {
             e
         })?;
 
+        // Crash spool: audio is appended to disk as it's captured, so a
+        // crash or kill can't lose the recording (recover with --recover).
+        let spool_dir = {
+            let sess = session.lock().unwrap();
+            self.cfg.sessions_dir.join(".recovery").join(&sess.id)
+        };
+        let spool_file = std::fs::create_dir_all(&spool_dir)
+            .and_then(|_| {
+                let meta = serde_json::json!({
+                    "name": session.lock().unwrap().name,
+                    "start_time": session.lock().unwrap().start_time.to_rfc3339(),
+                    "sample_rate": self.cfg.sample_rate,
+                    "channels": channels,
+                });
+                std::fs::write(spool_dir.join("meta.json"), meta.to_string())?;
+                std::fs::File::create(spool_dir.join("audio.pcm"))
+            })
+            .map_err(|e| log::warn!("crash spool unavailable: {e}"))
+            .ok();
+
         let audio_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         let streamer = {
             let session = Arc::clone(&session);
             let client = Arc::clone(&client);
             let audio_buf = Arc::clone(&audio_buf);
             let events = self.events.clone();
-            std::thread::spawn(move || stream_audio(rx, session, client, audio_buf, events))
+            std::thread::spawn(move || {
+                stream_audio(rx, session, client, audio_buf, events, spool_file)
+            })
         };
 
         *active = Some(Active {
             session,
+            spool_dir,
             capture,
             system_tap,
             client,
@@ -270,9 +295,11 @@ impl Manager {
         let buf = std::mem::take(&mut *active.audio_buf.lock().unwrap());
         let sess = active.session.lock().unwrap();
         if buf.is_empty() && sess.transcript.segments.is_empty() {
+            let _ = std::fs::remove_dir_all(&active.spool_dir);
             return Ok(None);
         }
         let folder = self.storage.save(&sess, &buf, self.cfg.sample_rate, active.channels)?;
+        let _ = std::fs::remove_dir_all(&active.spool_dir);
         Ok(Some(folder))
     }
 
@@ -287,6 +314,7 @@ impl Manager {
         drop(active.system_tap);
         let _ = active.streamer.join();
         let _ = active.client.lock().unwrap().close();
+        let _ = std::fs::remove_dir_all(&active.spool_dir);
         self.emit(SessionEvent::Status(Status::Idle));
     }
 
@@ -301,6 +329,82 @@ impl Manager {
             speaker_count: sess.transcript.speakers().len(),
             plain_text: sess.transcript.to_plain_text(),
         })
+    }
+
+    /// Recover crash-spooled recordings into saved sessions.
+    /// Returns (spool id, result) per spool found.
+    pub fn recover_spools(&self) -> Vec<(String, Result<PathBuf>)> {
+        let root = self.cfg.sessions_dir.join(".recovery");
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return Vec::new();
+        };
+        let mut results = Vec::new();
+        for entry in entries.filter_map(|e| e.ok()) {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            let outcome = self.recover_one(&dir);
+            if outcome.is_ok() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            results.push((id, outcome));
+        }
+        results
+    }
+
+    fn recover_one(&self, dir: &Path) -> Result<PathBuf> {
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("meta.json"))?)?;
+        let pcm = std::fs::read(dir.join("audio.pcm"))?;
+        let channels = meta.get("channels").and_then(|v| v.as_u64()).unwrap_or(1) as u16;
+        let sample_rate = meta
+            .get("sample_rate")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.cfg.sample_rate as u64) as u32;
+        if pcm.len() < sample_rate as usize * 2 * channels as usize {
+            bail!("less than a second of audio spooled");
+        }
+
+        let name = match meta.get("name").and_then(|v| v.as_str()).unwrap_or("") {
+            "" => "recovered".to_string(),
+            n => format!("{n}-recovered"),
+        };
+        let mut session = Session::new(&name);
+        if let Some(start) = meta
+            .get("start_time")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        {
+            session.start_time = start.with_timezone(&Local);
+        }
+        session.status = Status::Recording;
+        let secs = pcm.len() as f64 / (sample_rate as f64 * 2.0 * channels as f64);
+        let end_time = session.start_time + chrono::Duration::milliseconds((secs * 1000.0) as i64);
+        let session = Arc::new(Mutex::new(session));
+
+        let client = self.make_client(sample_rate, channels, &session);
+        client.lock().unwrap().connect()?;
+        for chunk in pcm.chunks(TARGET_SEND_BYTES * channels as usize) {
+            client.lock().unwrap().send_audio(chunk)?;
+        }
+        client.lock().unwrap().close()?;
+
+        {
+            let mut sess = session.lock().unwrap();
+            sess.status = Status::Finished;
+            sess.end_time = Some(end_time);
+        }
+        let sess = session.lock().unwrap();
+        self.storage.save(&sess, &pcm, sample_rate, channels)
+    }
+
+    /// Count of crash spools awaiting recovery.
+    pub fn pending_spools(&self) -> usize {
+        std::fs::read_dir(self.cfg.sessions_dir.join(".recovery"))
+            .map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count())
+            .unwrap_or(0)
     }
 
     /// Headless file transcription through the same STT pipeline.
@@ -357,6 +461,7 @@ fn stream_audio(
     client: Arc<Mutex<Box<dyn SttClient>>>,
     audio_buf: Arc<Mutex<Vec<u8>>>,
     events: mpsc::Sender<SessionEvent>,
+    mut spool: Option<std::fs::File>,
 ) {
     let mut send_buf: Vec<u8> = Vec::new();
     let mut total_chunks: u64 = 0;
@@ -394,6 +499,12 @@ fn stream_audio(
         }
 
         audio_buf.lock().unwrap().extend_from_slice(&chunk);
+        if let Some(f) = spool.as_mut() {
+            if f.write_all(&chunk).is_err() {
+                log::warn!("crash spool write failed; disabling spool");
+                spool = None;
+            }
+        }
 
         let level = crate::audio::calc_level(&chunk);
         if level == 0.0 {
