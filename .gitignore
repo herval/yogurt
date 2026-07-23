@@ -1,6 +1,6 @@
 .env
-yogurtgo
 yogurt.log
 sessions/
 yogurt
 yogurt.app/
+target/

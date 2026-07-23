@@ -32,11 +32,8 @@ make build                  # builds yogurt.app + ./yogurt symlink
 > inner binary) rather than a bare binary: macOS TCC refuses microphone
 > access to unbundled executables — they die with `Abort trap: 6`.
 
-Or use the run script which builds and runs in one step:
-
-```bash
-./run.sh
-```
+Building requires a Rust toolchain (`rustup`). `make run ARGS="--list-devices"`
+builds and runs in one step.
 
 ## Environment variables
 
@@ -57,7 +54,7 @@ Or use the run script which builds and runs in one step:
 
 ### Supported providers
 
-**STT:** `assemblyai` (streaming, default), `elevenlabs` (batch), `whisper` (local, requires `-tags whisper` build)
+**STT:** `assemblyai` (streaming, default), `elevenlabs` (batch), `whisper` (local — run `make setup MODEL=base` once to download the model and build with whisper support; requires `cmake`)
 
 **LLM:** `openai` (default), `gemini`, `anthropic`
 
@@ -78,6 +75,7 @@ LLM_MODEL=anthropic/claude-3-5-haiku-20241022          ANTHROPIC_API_KEY=...
 ./yogurt                        # start
 ./yogurt --list-devices         # list audio input devices
 ./yogurt --device 2             # use a specific device
+./yogurt --mic-check            # record 2s and report the input level
 ./yogurt --sessions-dir ~/meetings
 ```
 
