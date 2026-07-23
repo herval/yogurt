@@ -28,6 +28,8 @@ ratatui = "0.29"
 crossterm = "0.28"
 tui-textarea = "0.7"
 pulldown-cmark = { version = "0.12", default-features = false }
+opus = "0.3.1"
+ogg = "0.9"
 
 [dependencies.objc2]
 version = "0.6"

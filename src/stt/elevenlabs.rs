@@ -1,11 +1,20 @@
-//! Batch STT adapter for ElevenLabs Scribe, with optional quasi-live mode.
+//! Batch STT adapter for ElevenLabs Scribe, with quasi-live windows.
 //!
-//! Base behavior: audio is buffered locally and transcribed once on close().
-//! Quasi-live (default every 10s, tune/disable via YOGURT_ELEVENLABS_LIVE_SECS):
-//! while recording, each new window of audio is transcribed and delivered as
-//! it accumulates, then close() re-transcribes the WHOLE recording and
-//! replaces the live segments (consistent diarization for the saved session).
-//! Speaker letters may shift between the live view and the final pass.
+//! Live mode (default, every 10s — YOGURT_ELEVENLABS_LIVE_SECS to tune, 0 to
+//! disable): new audio is transcribed in windows cut at silence boundaries so
+//! words stay whole, and delivered as it accumulates.
+//!
+//! Close pass:
+//! - Stereo (channel-separated) recordings: the mic channel's "You" segments
+//!   from the live windows are kept; only the un-transcribed tail plus a
+//!   mono diarized pass over the remote channel are uploaded. Remote speakers
+//!   get whole-recording-consistent labels (A/B/C...) at ~¼ the upload cost
+//!   of re-transcribing everything.
+//! - Mono recordings: the whole recording is re-transcribed with diarization
+//!   (per-window speaker labels can't be stitched consistently).
+//!
+//! Uploads are Ogg-Opus (~16x smaller than WAV) when the sample rate allows,
+//! falling back to WAV otherwise.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,12 +24,19 @@ use anyhow::{Result, bail};
 use chrono::Local;
 use serde::Deserialize;
 
+use crate::audio::opus_enc::{encode_ogg_opus, opus_supports};
+use crate::audio::wav::wav_header;
+
 use super::{Segment, SttCallbacks, SttClient, channel_speaker, speaker_letter};
 
 const STT_URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
 const DEFAULT_LIVE_SECS: u64 = 10;
 /// Don't bother transcribing live windows shorter than this.
 const MIN_WINDOW_SECS: usize = 2;
+/// Timeout for small live-window uploads.
+const LIVE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Timeout for close-pass uploads (can cover a whole meeting).
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(900);
 
 pub struct ElevenLabsClient {
     api: Arc<Api>,
@@ -30,14 +46,15 @@ pub struct ElevenLabsClient {
     audio_buf: Arc<Mutex<Vec<u8>>>,
     closed: Mutex<bool>,
     live: Option<LiveState>,
+    /// Mic-channel segments delivered by live windows (stereo mode only);
+    /// they are authoritative and reused in the close pass.
+    live_you: Arc<Mutex<Vec<Segment>>>,
 }
 
 /// Request parameters shared with live-window worker threads.
 struct Api {
     api_key: String,
     model: String,
-    /// >1 → per-channel transcription (channel 0 = local mic = "You").
-    channels: u16,
 }
 
 struct LiveState {
@@ -73,7 +90,6 @@ impl ElevenLabsClient {
             api: Arc::new(Api {
                 api_key: api_key.to_string(),
                 model: if model.is_empty() { "scribe_v1".into() } else { model.into() },
-                channels,
             }),
             sample_rate,
             channels,
@@ -81,6 +97,7 @@ impl ElevenLabsClient {
             audio_buf: Arc::new(Mutex::new(Vec::new())),
             closed: Mutex::new(false),
             live,
+            live_you: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -122,26 +139,68 @@ impl ElevenLabsClient {
         let channels = self.channels;
         let in_flight = Arc::clone(&live.in_flight);
         let delivered = Arc::clone(&live.delivered);
+        let live_you = Arc::clone(&self.live_you);
         let offset_secs = start as f64 / (sample_rate as f64 * 2.0 * channels as f64);
         std::thread::spawn(move || {
-            let wav = wav_bytes(&window, sample_rate, channels);
-            match api.transcribe(&wav, Duration::from_secs(120)) {
+            let payload = audio_payload(&window, sample_rate, channels);
+            match api.transcribe(&payload, channels > 1, LIVE_TIMEOUT) {
                 Ok(segments) => {
                     for mut seg in segments {
                         seg.start_time += offset_secs;
                         seg.end_time += offset_secs;
                         delivered.store(true, Ordering::SeqCst);
+                        if channels > 1 && seg.speaker == "You" {
+                            live_you.lock().unwrap().push(seg.clone());
+                        }
                         (callbacks.on_segment)(seg);
                     }
                 }
                 Err(e) => {
-                    // Live windows are best-effort; the close() pass is
-                    // authoritative. Log, don't scare the UI.
+                    // Live windows are best-effort; the close() pass patches
+                    // the remote side, but a failed window loses its "You"
+                    // coverage in stereo mode — log loudly.
                     log::warn!("live transcription window failed: {e}");
                 }
             }
             in_flight.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// Stereo close pass: keep live "You" segments, transcribe the tail for
+    /// the remaining "You" coverage, and diarize the remote channel over the
+    /// whole recording for consistent A/B/C labels.
+    fn close_multichannel(&self, buf: &[u8]) -> Result<Vec<Segment>> {
+        let consumed = self
+            .live
+            .as_ref()
+            .map(|l| l.consumed.load(Ordering::SeqCst))
+            .unwrap_or(0);
+        let mut you: Vec<Segment> = std::mem::take(&mut *self.live_you.lock().unwrap());
+
+        // Tail: audio no live window covered (the whole recording when live
+        // mode is off). Only its mic-channel segments are kept — the remote
+        // pass below covers the other channel authoritatively.
+        let tail = &buf[consumed.min(buf.len())..];
+        let min_tail = self.sample_rate as usize * 2 * self.channels as usize / 2; // 0.5s
+        if tail.len() >= min_tail {
+            let offset = consumed as f64 / (self.sample_rate as f64 * 2.0 * self.channels as f64);
+            let payload = audio_payload(tail, self.sample_rate, self.channels);
+            for mut seg in self.api.transcribe(&payload, true, CLOSE_TIMEOUT)? {
+                seg.start_time += offset;
+                seg.end_time += offset;
+                if seg.speaker == "You" {
+                    you.push(seg);
+                }
+            }
+        }
+
+        // Remote channel, mono, diarized over the full recording.
+        let remote = split_channel(buf, 1, self.channels);
+        let payload = audio_payload(&remote, self.sample_rate, 1);
+        let mut merged = you;
+        merged.extend(self.api.transcribe(&payload, false, CLOSE_TIMEOUT)?);
+        merged.sort_by(|a, b| a.start_time.total_cmp(&b.start_time));
+        Ok(merged)
     }
 }
 
@@ -174,20 +233,25 @@ impl SttClient for ElevenLabsClient {
             if buf.is_empty() {
                 return Ok(());
             }
-            let wav = wav_bytes(&buf, self.sample_rate, self.channels);
-            // The full-recording upload can be hundreds of MB for long
-            // meetings — give it far more headroom than the live windows.
-            let segments = self.api.transcribe(&wav, Duration::from_secs(900))?;
             let live_delivered = self
                 .live
                 .as_ref()
                 .is_some_and(|l| l.delivered.load(Ordering::SeqCst));
-            if live_delivered {
-                // Authoritative full pass supersedes the live windows.
-                (self.callbacks.on_replace)(segments);
+
+            if self.channels > 1 {
+                let merged = self.close_multichannel(&buf)?;
+                if !merged.is_empty() {
+                    (self.callbacks.on_replace)(merged);
+                }
             } else {
-                for seg in segments {
-                    (self.callbacks.on_segment)(seg);
+                let payload = audio_payload(&buf, self.sample_rate, 1);
+                let segments = self.api.transcribe(&payload, false, CLOSE_TIMEOUT)?;
+                if live_delivered {
+                    (self.callbacks.on_replace)(segments);
+                } else {
+                    for seg in segments {
+                        (self.callbacks.on_segment)(seg);
+                    }
                 }
             }
             Ok(())
@@ -201,10 +265,58 @@ impl SttClient for ElevenLabsClient {
     }
 }
 
+struct AudioPayload {
+    bytes: Vec<u8>,
+    filename: &'static str,
+    mime: &'static str,
+}
+
+/// Prefer Ogg-Opus (small); fall back to WAV for unsupported sample rates.
+fn audio_payload(pcm: &[u8], sample_rate: u32, channels: u16) -> AudioPayload {
+    if opus_supports(sample_rate) && channels <= 2 {
+        match encode_ogg_opus(pcm, sample_rate, channels) {
+            Ok(bytes) => {
+                return AudioPayload {
+                    bytes,
+                    filename: "audio.ogg",
+                    mime: "audio/ogg",
+                };
+            }
+            Err(e) => log::warn!("opus encode failed, falling back to wav: {e}"),
+        }
+    }
+    let mut bytes = wav_header(pcm.len() as u32, sample_rate, channels);
+    bytes.extend_from_slice(pcm);
+    AudioPayload {
+        bytes,
+        filename: "audio.wav",
+        mime: "audio/wav",
+    }
+}
+
+/// Extract one channel from interleaved PCM16 LE.
+fn split_channel(pcm: &[u8], channel: usize, channels: u16) -> Vec<u8> {
+    let ch = channels as usize;
+    if ch <= 1 {
+        return pcm.to_vec();
+    }
+    let mut out = Vec::with_capacity(pcm.len() / ch);
+    for frame in pcm.chunks_exact(2 * ch) {
+        let off = channel * 2;
+        out.extend_from_slice(&frame[off..off + 2]);
+    }
+    out
+}
+
 impl Api {
-    fn transcribe(&self, wav: &[u8], timeout: Duration) -> Result<Vec<Segment>> {
+    fn transcribe(
+        &self,
+        audio: &AudioPayload,
+        multichannel: bool,
+        timeout: Duration,
+    ) -> Result<Vec<Segment>> {
         let boundary = "----yogurt-multipart-boundary";
-        let mut body: Vec<u8> = Vec::with_capacity(wav.len() + 512);
+        let mut body: Vec<u8> = Vec::with_capacity(audio.bytes.len() + 512);
         let mut field = |name: &str, value: &str| {
             body.extend_from_slice(
                 format!(
@@ -214,7 +326,7 @@ impl Api {
             );
         };
         field("model_id", &self.model);
-        if self.channels > 1 {
+        if multichannel {
             field("use_multi_channel", "true");
             field("multichannel_output_style", "combined");
         } else {
@@ -222,11 +334,12 @@ impl Api {
         }
         body.extend_from_slice(
             format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
+                audio.filename, audio.mime
             )
             .as_bytes(),
         );
-        body.extend_from_slice(wav);
+        body.extend_from_slice(&audio.bytes);
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
         let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -249,7 +362,7 @@ impl Api {
         }
         let parsed: ElevenLabsResponse = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("parse elevenlabs response: {e}"))?;
-        Ok(to_segments(parsed, self.channels > 1))
+        Ok(to_segments(parsed, multichannel))
     }
 }
 
@@ -293,13 +406,6 @@ fn silence_cut_point(pcm: &[u8], sample_rate: u32, channels: u16) -> usize {
         }
     }
     best_cut.unwrap_or(pcm.len())
-}
-
-fn wav_bytes(pcm: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
-    let mut out = crate::audio::wav::wav_header(pcm.len() as u32, sample_rate, channels);
-    out.reserve(pcm.len());
-    out.extend_from_slice(pcm);
-    out
 }
 
 #[derive(Deserialize)]
@@ -446,7 +552,7 @@ fn to_segments_by_speaker(
 
 #[cfg(test)]
 mod tests {
-    use super::silence_cut_point;
+    use super::*;
 
     fn tone(frames_ms: usize, amp: i16, rate: u32) -> Vec<u8> {
         let samples = rate as usize / 1000 * frames_ms;
@@ -466,7 +572,10 @@ mod tests {
         pcm.extend(tone(500, 0, rate)); // 0.5s silence
         pcm.extend(tone(500, 8000, rate)); // 0.5s speech again
         let cut = silence_cut_point(&pcm, rate, 1);
-        assert!(cut > silence_start && cut < silence_start + rate as usize, "cut {cut} not inside silence at {silence_start}");
+        assert!(
+            cut > silence_start && cut < silence_start + rate as usize,
+            "cut {cut} not inside silence at {silence_start}"
+        );
         assert_eq!(cut % 2, 0);
     }
 
@@ -475,5 +584,32 @@ mod tests {
         let rate = 16000;
         let pcm = tone(10000, 8000, rate);
         assert_eq!(silence_cut_point(&pcm, rate, 1), pcm.len());
+    }
+
+    #[test]
+    fn split_channel_extracts_interleaved() {
+        // Frames: L=1, R=2 repeated
+        let mut pcm = Vec::new();
+        for _ in 0..4 {
+            pcm.extend_from_slice(&1i16.to_le_bytes());
+            pcm.extend_from_slice(&2i16.to_le_bytes());
+        }
+        let left = split_channel(&pcm, 0, 2);
+        let right = split_channel(&pcm, 1, 2);
+        assert!(left.chunks_exact(2).all(|c| i16::from_le_bytes([c[0], c[1]]) == 1));
+        assert!(right.chunks_exact(2).all(|c| i16::from_le_bytes([c[0], c[1]]) == 2));
+        assert_eq!(left.len(), pcm.len() / 2);
+    }
+
+    #[test]
+    fn payload_prefers_opus_and_falls_back_to_wav() {
+        let pcm = tone(1000, 4000, 16000);
+        let p = audio_payload(&pcm, 16000, 1);
+        assert_eq!(p.filename, "audio.ogg");
+        assert!(p.bytes.len() < pcm.len() / 4);
+
+        let p = audio_payload(&pcm, 44100, 1);
+        assert_eq!(p.filename, "audio.wav");
+        assert_eq!(&p.bytes[0..4], b"RIFF");
     }
 }

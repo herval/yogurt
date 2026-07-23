@@ -20,6 +20,7 @@ whisper) get a mixed-down stream with acoustic diarization instead.
 ## Requirements
 
 - macOS (uses AVFoundation for audio)
+- `libopus` for compressed STT uploads (`brew install opus`)
 - An STT provider API key (transcription) — AssemblyAI by default
 - An LLM provider API key (chat, optional)
 
