@@ -9,7 +9,11 @@ MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${MODE
 
 echo "==> Setting up Whisper (model: $MODEL)"
 
-# Download model if not already present
+if ! command -v cmake >/dev/null; then
+  echo "==> cmake is required to build whisper.cpp (brew install cmake)" >&2
+  exit 1
+fi
+
 if [ -f "$MODEL_FILE" ]; then
   echo "==> Model already at $MODEL_FILE"
 else
@@ -18,41 +22,9 @@ else
   curl -L --progress-bar "$MODEL_URL" -o "$MODEL_FILE"
 fi
 
-# Install whisper-cpp via homebrew (handles compilation, headers, and libs)
-echo "==> Installing whisper-cpp via homebrew..."
-brew install whisper-cpp
-
-WHISPER_PREFIX=$(brew --prefix whisper-cpp)
-GGML_PREFIX=$(brew --prefix ggml)
-echo "==> whisper-cpp at: $WHISPER_PREFIX"
-echo "==> ggml at: $GGML_PREFIX"
-
-# Pull Go bindings (adds to go.mod)
-echo "==> Fetching whisper.cpp Go bindings..."
-go get github.com/ggerganov/whisper.cpp/bindings/go
-
-# Brew ships libwhisper.dylib with ggml baked in, but the Go bindings still
-# request -lggml -lggml-base -lggml-cpu etc. via #cgo LDFLAGS.
-# Create empty stub archives to satisfy the linker (symbols are in libwhisper).
-STUB_DIR=$(mktemp -d)
-trap 'rm -rf "$STUB_DIR"' EXIT
-printf 'void _yogurt_ggml_stub(void) {}\n' > "$STUB_DIR/stub.c"
-cc -c "$STUB_DIR/stub.c" -o "$STUB_DIR/stub.o"
-for lib in ggml ggml-base ggml-cpu ggml-metal ggml-blas; do
-  ar rcs "$STUB_DIR/lib${lib}.a" "$STUB_DIR/stub.o"
-done
-
-# Build yogurt with whisper support
+# whisper-rs vendors and builds whisper.cpp itself; no brew packages needed.
 echo "==> Building yogurt with whisper support..."
-# Build into an .app bundle: TCC only honors the mic usage description
-# (Info.plist) for bundled apps, and kills bare binaries that request access.
-mkdir -p yogurt.app/Contents/MacOS
-cp Info.plist yogurt.app/Contents/Info.plist
-CGO_CFLAGS="-I${WHISPER_PREFIX}/include -I${GGML_PREFIX}/include" \
-CGO_LDFLAGS="-L${WHISPER_PREFIX}/lib -L${STUB_DIR} -lwhisper -lstdc++ -framework Accelerate -framework Foundation" \
-go build -tags whisper -o yogurt.app/Contents/MacOS/yogurt .
-codesign -f -s "${SIGN_ID:--}" yogurt.app
-ln -sf yogurt.app/Contents/MacOS/yogurt yogurt
+make build FEATURES=whisper
 
 echo ""
 echo "Done! Run with:"
