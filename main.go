@@ -18,6 +18,8 @@ import (
 )
 
 func main() {
+	maybeReexecDisclaimed()
+
 	listDevices := flag.Bool("list-devices", false, "List available audio input devices and exit")
 	deviceFlag := flag.Int("device", -1, "Audio input device index (-1 = default)")
 	sessionsDirFlag := flag.String("sessions-dir", "", "Directory to save sessions (overrides YOGURT_SESSIONS_DIR)")

@@ -23,7 +23,9 @@ echo "==> Installing whisper-cpp via homebrew..."
 brew install whisper-cpp
 
 WHISPER_PREFIX=$(brew --prefix whisper-cpp)
+GGML_PREFIX=$(brew --prefix ggml)
 echo "==> whisper-cpp at: $WHISPER_PREFIX"
+echo "==> ggml at: $GGML_PREFIX"
 
 # Pull Go bindings (adds to go.mod)
 echo "==> Fetching whisper.cpp Go bindings..."
@@ -42,9 +44,15 @@ done
 
 # Build yogurt with whisper support
 echo "==> Building yogurt with whisper support..."
-CGO_CFLAGS="-I${WHISPER_PREFIX}/include" \
+# Build into an .app bundle: TCC only honors the mic usage description
+# (Info.plist) for bundled apps, and kills bare binaries that request access.
+mkdir -p yogurt.app/Contents/MacOS
+cp Info.plist yogurt.app/Contents/Info.plist
+CGO_CFLAGS="-I${WHISPER_PREFIX}/include -I${GGML_PREFIX}/include" \
 CGO_LDFLAGS="-L${WHISPER_PREFIX}/lib -L${STUB_DIR} -lwhisper -lstdc++ -framework Accelerate -framework Foundation" \
-go build -tags whisper -o yogurt .
+go build -tags whisper -o yogurt.app/Contents/MacOS/yogurt .
+codesign -f -s "${SIGN_ID:--}" yogurt.app
+ln -sf yogurt.app/Contents/MacOS/yogurt yogurt
 
 echo ""
 echo "Done! Run with:"

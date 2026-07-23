@@ -24,9 +24,13 @@ chat with the transcript using AI.
 ```bash
 cd yogurt
 cp .env.example .env        # add your API keys
-go build -o yogurt
+make build                  # builds yogurt.app + ./yogurt symlink
 ./yogurt
 ```
+
+> `make build` produces an `.app` bundle (with `./yogurt` symlinked to the
+> inner binary) rather than a bare binary: macOS TCC refuses microphone
+> access to unbundled executables — they die with `Abort trap: 6`.
 
 Or use the run script which builds and runs in one step:
 
