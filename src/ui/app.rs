@@ -156,6 +156,8 @@ impl App {
             AppMsg::SaveResult {
                 folder,
                 transcript,
+                word_count,
+                stt_err,
                 err,
             } => {
                 // Flush the live chat before the quit path below can return.
@@ -171,8 +173,22 @@ impl App {
                         self.should_quit = true;
                         return;
                     }
-                    self.set_notice("Saved — generating title & summary...", false);
-                    self.cmd_generate_meta(folder, transcript);
+                    if word_count == 0 {
+                        // Audio is saved and recoverable (yogurt --file), but
+                        // an empty transcript must not look like success.
+                        let reason = stt_err
+                            .unwrap_or_else(|| "no words transcribed".into());
+                        self.set_notice(
+                            format!("Saved audio, but transcript is EMPTY: {reason}"),
+                            true,
+                        );
+                    } else if let Some(e) = stt_err {
+                        self.set_notice(format!("Saved (transcription incomplete: {e})"), true);
+                        self.cmd_generate_meta(folder, transcript);
+                    } else {
+                        self.set_notice("Saved — generating title & summary...", false);
+                        self.cmd_generate_meta(folder, transcript);
+                    }
                 } else {
                     self.set_notice("Session ended (nothing to save)", false);
                 }
@@ -183,15 +199,19 @@ impl App {
             }
             AppMsg::MetaGenerated { title, speakers, err } => {
                 self.summary_pending = false;
-                match err {
-                    Some(e) => self.set_notice(format!("Saved (could not generate title: {e})"), false),
-                    None if speakers.is_empty() => {
-                        self.set_notice(format!("\u{201c}{title}\u{201d}"), false)
+                // A visible error (e.g. "saved but transcription failed")
+                // outranks the routine title announcement.
+                if !self.notice_err {
+                    match err {
+                        Some(e) => self.set_notice(format!("Saved (could not generate title: {e})"), false),
+                        None if speakers.is_empty() => {
+                            self.set_notice(format!("\u{201c}{title}\u{201d}"), false)
+                        }
+                        None => self.set_notice(
+                            format!("\u{201c}{title}\u{201d} — speakers: {}", speakers.join(", ")),
+                            false,
+                        ),
                     }
-                    None => self.set_notice(
-                        format!("\u{201c}{title}\u{201d} — speakers: {}", speakers.join(", ")),
-                        false,
-                    ),
                 }
                 self.cmd_load_sessions();
             }
@@ -649,21 +669,27 @@ impl App {
     fn cmd_finish(&self) {
         let tx = self.tx.clone();
         let mgr = Arc::clone(&self.mgr);
-        let transcript = self
-            .mgr
-            .snapshot()
-            .map(|s| s.plain_text)
-            .unwrap_or_default();
         std::thread::spawn(move || {
             let msg = match mgr.finish() {
-                Ok(folder) => AppMsg::SaveResult {
-                    folder,
-                    transcript,
+                Ok(Some(o)) => AppMsg::SaveResult {
+                    folder: Some(o.folder),
+                    transcript: o.transcript,
+                    word_count: o.word_count,
+                    stt_err: o.stt_error,
+                    err: None,
+                },
+                Ok(None) => AppMsg::SaveResult {
+                    folder: None,
+                    transcript: String::new(),
+                    word_count: 0,
+                    stt_err: None,
                     err: None,
                 },
                 Err(e) => AppMsg::SaveResult {
                     folder: None,
-                    transcript,
+                    transcript: String::new(),
+                    word_count: 0,
+                    stt_err: None,
                     err: Some(format!("{e:#}")),
                 },
             };

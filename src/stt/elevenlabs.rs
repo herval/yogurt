@@ -158,8 +158,9 @@ impl ElevenLabsClient {
                 Err(e) => {
                     // Live windows are best-effort; the close() pass patches
                     // the remote side, but a failed window loses its "You"
-                    // coverage in stereo mode — log loudly.
+                    // coverage in stereo mode — tell the UI, not just the log.
                     log::warn!("live transcription window failed: {e}");
+                    (callbacks.on_error)(format!("live transcription failed: {e}"));
                 }
             }
             in_flight.store(false, Ordering::SeqCst);

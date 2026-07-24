@@ -271,7 +271,7 @@ impl Manager {
 
     /// Blocking: stops capture, closes the STT client (batch providers deliver
     /// their segments during close), then saves. Call from a worker thread.
-    pub fn finish(&self) -> Result<Option<PathBuf>> {
+    pub fn finish(&self) -> Result<Option<SaveOutcome>> {
         let Some(active) = self.active.lock().unwrap().take() else {
             return Ok(None);
         };
@@ -288,9 +288,15 @@ impl Manager {
         drop(active.system_tap);
         let _ = active.streamer.join();
 
-        if let Err(e) = active.client.lock().unwrap().close() {
-            log::warn!("stt close: {e}");
-        }
+        // Audio is saved regardless; a failed close pass must still be
+        // reported so the UI can distinguish "saved" from "saved but silent".
+        let stt_error = match active.client.lock().unwrap().close() {
+            Ok(()) => None,
+            Err(e) => {
+                log::warn!("stt close: {e}");
+                Some(format!("{e:#}"))
+            }
+        };
 
         let buf = std::mem::take(&mut *active.audio_buf.lock().unwrap());
         let sess = active.session.lock().unwrap();
@@ -300,7 +306,12 @@ impl Manager {
         }
         let folder = self.storage.save(&sess, &buf, self.cfg.sample_rate, active.channels)?;
         let _ = std::fs::remove_dir_all(&active.spool_dir);
-        Ok(Some(folder))
+        Ok(Some(SaveOutcome {
+            folder,
+            transcript: sess.transcript.to_plain_text(),
+            word_count: sess.transcript.word_count(),
+            stt_error,
+        }))
     }
 
     /// Tear down without saving. Not bound in the UI (Go parity) but part of
@@ -453,6 +464,16 @@ pub struct SessionSnapshot {
     pub word_count: usize,
     pub speaker_count: usize,
     pub plain_text: String,
+}
+
+/// Result of a successful save: where it went, the final transcript (batch
+/// providers deliver segments during close, after any UI snapshot), and any
+/// STT failure that left the transcript incomplete.
+pub struct SaveOutcome {
+    pub folder: PathBuf,
+    pub transcript: String,
+    pub word_count: usize,
+    pub stt_error: Option<String>,
 }
 
 fn stream_audio(

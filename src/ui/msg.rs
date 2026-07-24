@@ -23,6 +23,10 @@ pub enum AppMsg {
     SaveResult {
         folder: Option<PathBuf>,
         transcript: String,
+        /// Words in the saved transcript; 0 means STT produced nothing.
+        word_count: usize,
+        /// STT failure during close — the audio still saved.
+        stt_err: Option<String>,
         err: Option<String>,
     },
     MetaGenerated {
