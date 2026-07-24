@@ -1,8 +1,8 @@
 MODEL ?= base
 # A stable signing identity so the microphone grant survives rebuilds; ad-hoc
 # ("-") gets a new code identity every build, so macOS re-prompts each time.
-# Override with your own: make build SIGN_ID=yogurt-dev
-SIGN_ID ?= muxterm-local
+# yogurt-dev is a local self-signed code-signing cert in the login keychain.
+SIGN_ID ?= yogurt-dev
 # Extra cargo features, e.g. FEATURES=whisper
 FEATURES ?=
 
