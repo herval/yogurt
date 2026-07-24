@@ -137,7 +137,10 @@ fn main() {
         let mut failed = false;
         for (id, outcome) in results {
             match outcome {
-                Ok(folder) => println!("Recovered {id} -> {}", folder.display()),
+                Ok(folder) => {
+                    println!("Recovered {id} -> {}", folder.display());
+                    generate_meta_headless(&cfg, &mgr.storage, &folder);
+                }
                 Err(e) => {
                     failed = true;
                     eprintln!("Failed to recover {id}: {e:#}");
@@ -178,7 +181,10 @@ fn main() {
             }
         });
         match result {
-            Ok(folder) => println!("Done. Session saved to: {}", folder.display()),
+            Ok(folder) => {
+                println!("Done. Session saved to: {}", folder.display());
+                generate_meta_headless(&cfg, &mgr.storage, &folder);
+            }
             Err(e) => {
                 eprintln!("Error: {e:#}");
                 std::process::exit(1);
@@ -218,6 +224,31 @@ fn main() {
     if let Err(e) = ui::run(mgr, events_rx, devices, cfg, templates) {
         eprintln!("Error: {e:#}");
         std::process::exit(1);
+    }
+}
+
+/// Best-effort title/summary generation for headless saves (--file, --recover).
+/// Failures are non-fatal: the transcription itself already succeeded.
+fn generate_meta_headless(
+    cfg: &Config,
+    storage: &session::storage::Storage,
+    folder: &std::path::Path,
+) {
+    if cfg.llm_api_key.is_empty() {
+        return;
+    }
+    let transcript = storage.load_transcript(folder);
+    if transcript.trim().is_empty() {
+        return;
+    }
+    println!("Generating title & summary...");
+    let client = llm::client::LlmClient::new(&cfg.llm_provider, &cfg.llm_api_key, &cfg.llm_model);
+    match client.generate_meta(&transcript) {
+        Ok(meta) => match storage.save_meta(folder, &meta.title, &meta.summary) {
+            Ok(()) => println!("  \u{201c}{}\u{201d}", meta.title),
+            Err(e) => eprintln!("Could not save summary: {e:#}"),
+        },
+        Err(e) => eprintln!("Could not generate summary: {e:#}"),
     }
 }
 

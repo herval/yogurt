@@ -13,9 +13,16 @@ use crate::session::manager::Manager;
 use crate::session::{SessionEvent, SessionSummary, Status};
 use crate::stt::Segment;
 
-use super::msg::AppMsg;
+use super::msg::{AppMsg, ChatScope};
 
 const CHAT_CHAR_LIMIT: usize = 500;
+
+fn new_chat_input(placeholder: &str) -> TextArea<'static> {
+    let mut ta = TextArea::default();
+    ta.set_placeholder_text(placeholder.to_string());
+    ta.set_cursor_line_style(ratatui::style::Style::default());
+    ta
+}
 
 pub struct TranscriptLine {
     pub seg: Segment,
@@ -56,12 +63,19 @@ pub struct App {
     pub summary_scroll: usize,
     pub summary_pending: bool,
 
-    // Chat
+    // Chat — chat_msgs always holds the current scope's conversation.
     pub chat_open: bool,
     pub chat_input: TextArea<'static>,
     pub chat_msgs: Vec<ChatMessage>,
     pub chat_scroll: usize,
-    pub chat_loading: bool,
+    pub chat_scope: ChatScope,
+    /// Scope of the in-flight ask, if any.
+    chat_pending: Option<ChatScope>,
+    /// Generation counter for Live scopes; bumped per recording.
+    live_seq: u64,
+    /// Last finished recording's (generation, folder) so a late Live reply
+    /// can still land in the saved session.
+    finished_live: Option<(u64, PathBuf)>,
 
     // Template picker
     pub templates: Vec<Template>,
@@ -82,9 +96,8 @@ impl App {
         templates: Vec<Template>,
         tx: Sender<AppMsg>,
     ) -> App {
-        let mut chat_input = TextArea::default();
-        chat_input.set_placeholder_text("Ask about the transcript...");
-        chat_input.set_cursor_line_style(ratatui::style::Style::default());
+        let chat_input = new_chat_input("Ask anything...");
+        let chat_msgs = mgr.storage.load_global_chat();
         App {
             mgr,
             devices,
@@ -110,9 +123,12 @@ impl App {
             summary_pending: false,
             chat_open: false,
             chat_input,
-            chat_msgs: Vec::new(),
+            chat_msgs,
             chat_scroll: 0,
-            chat_loading: false,
+            chat_scope: ChatScope::Global,
+            chat_pending: None,
+            live_seq: 0,
+            finished_live: None,
             templates,
             template_open: false,
             template_idx: 0,
@@ -142,6 +158,11 @@ impl App {
                 transcript,
                 err,
             } => {
+                // Flush the live chat before the quit path below can return.
+                if let (ChatScope::Live(n), Some(f)) = (&self.chat_scope, &folder) {
+                    self.finished_live = Some((*n, f.clone()));
+                }
+                self.set_chat_scope(ChatScope::Global);
                 self.home_mode = true;
                 if let Some(e) = err {
                     self.set_notice(format!("Error saving: {e}"), true);
@@ -161,6 +182,7 @@ impl App {
                 self.cmd_load_sessions();
             }
             AppMsg::MetaGenerated { title, speakers, err } => {
+                self.summary_pending = false;
                 match err {
                     Some(e) => self.set_notice(format!("Saved (could not generate title: {e})"), false),
                     None if speakers.is_empty() => {
@@ -173,28 +195,40 @@ impl App {
                 }
                 self.cmd_load_sessions();
             }
-            AppMsg::ChatResponse { content, err } => {
-                self.chat_loading = false;
-                let content = match err {
-                    Some(e) => format!("Error: {e}"),
-                    None => content,
-                };
-                self.chat_msgs.push(ChatMessage {
+            AppMsg::ChatResponse { scope, content, err } => {
+                if self.chat_pending.as_ref() == Some(&scope) {
+                    self.chat_pending = None;
+                }
+                let msg = ChatMessage {
                     role: "assistant".into(),
-                    content,
-                });
-                // Persist chats on stored sessions only.
-                if let Some(viewing) = &self.viewing {
-                    let _ = self
-                        .mgr
-                        .storage
-                        .save_chat(std::path::Path::new(&viewing.folder), &self.chat_msgs);
+                    content: match err {
+                        Some(e) => format!("Error: {e}"),
+                        None => content,
+                    },
+                };
+                if scope == self.chat_scope {
+                    self.chat_msgs.push(msg);
+                    self.persist_chat();
+                } else if let Some(dir) = self.chat_dir(&scope) {
+                    // Late reply for a scope we've left; the user turn was
+                    // persisted there when we switched away.
+                    let mut msgs = self.mgr.storage.load_chat(&dir);
+                    msgs.push(msg);
+                    let _ = self.mgr.storage.save_chat(&dir, &msgs);
+                } else {
+                    self.set_notice("Chat reply discarded (recording ended without saving)", true);
                 }
             }
             AppMsg::SessionsLoaded(sessions) => {
                 self.sessions = sessions;
                 if self.session_idx >= self.sessions.len() {
                     self.session_idx = self.sessions.len().saturating_sub(1);
+                }
+                // Refresh the open view so a freshly generated summary appears live.
+                if let Some(v) = &self.viewing
+                    && let Some(fresh) = self.sessions.iter().find(|s| s.folder == v.folder)
+                {
+                    self.viewing = Some(fresh.clone());
                 }
             }
         }
@@ -292,7 +326,6 @@ impl App {
                         role: "user".into(),
                         content: t.name.clone(),
                     });
-                    self.chat_loading = true;
                     self.chat_scroll = 0;
                     self.cmd_ask(t.prompt);
                 }
@@ -315,18 +348,12 @@ impl App {
             }
             KeyCode::Enter => {
                 let text = self.chat_input_text();
-                if !text.is_empty() && !self.chat_loading {
+                if !text.is_empty() && !self.chat_loading() {
                     self.chat_msgs.push(ChatMessage {
                         role: "user".into(),
                         content: text.clone(),
                     });
-                    self.chat_input = {
-                        let mut ta = TextArea::default();
-                        ta.set_placeholder_text("Ask about the transcript...");
-                        ta.set_cursor_line_style(ratatui::style::Style::default());
-                        ta
-                    };
-                    self.chat_loading = true;
+                    self.chat_input = new_chat_input(self.chat_placeholder());
                     self.chat_scroll = 0;
                     self.cmd_ask(text);
                 }
@@ -345,6 +372,58 @@ impl App {
 
     pub fn chat_input_text(&self) -> String {
         self.chat_input.lines().join(" ").trim().to_string()
+    }
+
+    pub fn chat_loading(&self) -> bool {
+        self.chat_pending.as_ref() == Some(&self.chat_scope)
+    }
+
+    fn chat_placeholder(&self) -> &'static str {
+        match self.chat_scope {
+            ChatScope::Global => "Ask anything...",
+            _ => "Ask about the transcript...",
+        }
+    }
+
+    /// Where a scope's chat lives on disk, if anywhere.
+    fn chat_dir(&self, scope: &ChatScope) -> Option<PathBuf> {
+        match scope {
+            ChatScope::Global => Some(self.mgr.storage.base_dir.clone()),
+            ChatScope::Session(f) if f.exists() => Some(f.clone()),
+            ChatScope::Session(_) => None, // deleted since
+            ChatScope::Live(n) => self
+                .finished_live
+                .as_ref()
+                .filter(|(m, _)| m == n)
+                .map(|(_, f)| f.clone()),
+        }
+    }
+
+    fn persist_chat(&self) {
+        if self.chat_msgs.is_empty() {
+            return;
+        }
+        if self.chat_scope == ChatScope::Global {
+            let _ = self.mgr.storage.save_global_chat(&self.chat_msgs);
+        } else if let Some(dir) = self.chat_dir(&self.chat_scope) {
+            let _ = self.mgr.storage.save_chat(&dir, &self.chat_msgs);
+        }
+    }
+
+    /// The single scope-transition funnel: save the outgoing conversation,
+    /// load the incoming one. chat_pending stays — it tags the request.
+    fn set_chat_scope(&mut self, scope: ChatScope) {
+        if scope == self.chat_scope {
+            return;
+        }
+        self.persist_chat();
+        self.chat_scope = scope;
+        self.chat_msgs = match &self.chat_scope {
+            ChatScope::Session(f) => self.mgr.storage.load_chat(f),
+            ChatScope::Global => self.mgr.storage.load_global_chat(),
+            ChatScope::Live(_) => Vec::new(),
+        };
+        self.chat_scroll = 0;
     }
 
     fn handle_base_key(&mut self, key: KeyEvent) {
@@ -407,9 +486,9 @@ impl App {
                             .mgr
                             .storage
                             .load_transcript(std::path::Path::new(&s.folder));
+                        self.set_chat_scope(ChatScope::Session(PathBuf::from(&s.folder)));
                         self.viewing = Some(s);
                         self.scroll = 0;
-                        self.chat_msgs.clear();
                         self.summary_open = true;
                         self.summary_scroll = 0;
                         self.summary_pending = false;
@@ -419,10 +498,22 @@ impl App {
             KeyCode::Esc => {
                 self.viewing = None;
                 self.chat_open = false;
+                self.set_chat_scope(ChatScope::Global);
             }
-            KeyCode::Char('c') | KeyCode::Char('C') => {
+            KeyCode::Char('c') | KeyCode::Char('C') => self.open_chat(),
+            KeyCode::Char('s') | KeyCode::Char('S') => {
                 if self.viewing.is_some() {
-                    self.open_chat();
+                    self.toggle_summary();
+                }
+            }
+            KeyCode::PageUp => {
+                if self.viewing.is_some() {
+                    self.summary_scroll = self.summary_scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::PageDown => {
+                if self.viewing.is_some() {
+                    self.summary_scroll += 1;
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') => self.new_session(),
@@ -478,6 +569,35 @@ impl App {
         }
         self.chat_open = true;
         self.chat_scroll = 0;
+        self.chat_input.set_placeholder_text(self.chat_placeholder());
+    }
+
+    fn toggle_summary(&mut self) {
+        let Some(viewing) = &self.viewing else { return };
+        if !viewing.summary.is_empty() {
+            self.summary_open = !self.summary_open;
+            return;
+        }
+        let folder = PathBuf::from(&viewing.folder);
+        // No summary yet: generate on demand (legacy sessions, failed runs).
+        if self.cfg.llm_api_key.is_empty() {
+            let provider = self.cfg.llm_provider.to_uppercase();
+            self.set_notice(
+                format!("Set LLM_MODEL and {provider}_API_KEY to enable summaries"),
+                true,
+            );
+            return;
+        }
+        if self.view_raw.trim().is_empty() {
+            self.set_notice("Transcript is empty — nothing to summarize", true);
+            return;
+        }
+        if !self.summary_pending {
+            self.summary_pending = true;
+            self.summary_open = true;
+            self.set_notice("Generating summary...", false);
+            self.cmd_generate_meta(folder, self.view_raw.clone());
+        }
     }
 
     fn new_session(&mut self) {
@@ -489,6 +609,8 @@ impl App {
         self.home_mode = false;
         self.viewing = None;
         self.chat_open = false;
+        self.live_seq += 1;
+        self.set_chat_scope(ChatScope::Live(self.live_seq));
         self.cmd_start_session();
     }
 
@@ -497,6 +619,8 @@ impl App {
             self.quitting = true;
             self.cmd_finish();
         } else {
+            // Keep a just-typed user turn; its reply can't arrive anymore.
+            self.persist_chat();
             self.should_quit = true;
         }
     }
@@ -599,20 +723,29 @@ impl App {
         });
     }
 
-    fn cmd_ask(&self, user_msg: String) {
-        let transcript = if self.viewing.is_some() {
-            self.view_raw.clone()
-        } else {
-            self.mgr
-                .snapshot()
-                .map(|s| s.plain_text)
-                .unwrap_or_default()
+    fn cmd_ask(&mut self, user_msg: String) {
+        let scope = self.chat_scope.clone();
+        self.chat_pending = Some(scope.clone());
+        let system = match &scope {
+            ChatScope::Global => "You are a helpful assistant inside a meeting-recorder app. \
+                 No recording is currently open. Answer concisely."
+                .to_string(),
+            _ => {
+                let transcript = if self.viewing.is_some() {
+                    self.view_raw.clone()
+                } else {
+                    self.mgr
+                        .snapshot()
+                        .map(|s| s.plain_text)
+                        .unwrap_or_default()
+                };
+                format!(
+                    "You are a helpful assistant answering questions about a live meeting recording. \
+                     Answer concisely based on the transcript below. If the transcript is empty or the \
+                     answer isn't there, say so.\n\nTranscript so far:\n{transcript}"
+                )
+            }
         };
-        let system = format!(
-            "You are a helpful assistant answering questions about a live meeting recording. \
-             Answer concisely based on the transcript below. If the transcript is empty or the \
-             answer isn't there, say so.\n\nTranscript so far:\n{transcript}"
-        );
         // History excludes the just-appended user turn.
         let history: Vec<ChatMessage> = self.chat_msgs[..self.chat_msgs.len().saturating_sub(1)].to_vec();
         let client = LlmClient::new(
@@ -623,8 +756,13 @@ impl App {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let msg = match client.ask(&system, &history, &user_msg) {
-                Ok(content) => AppMsg::ChatResponse { content, err: None },
+                Ok(content) => AppMsg::ChatResponse {
+                    scope,
+                    content,
+                    err: None,
+                },
                 Err(e) => AppMsg::ChatResponse {
+                    scope,
                     content: String::new(),
                     err: Some(format!("{e:#}")),
                 },

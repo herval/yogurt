@@ -8,6 +8,7 @@ use crate::session::Status;
 
 use super::app::App;
 use super::markdown::render_markdown;
+use super::msg::ChatScope;
 use super::wrap::{truncate, word_wrap};
 
 const TITLE_STYLE: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
@@ -137,7 +138,12 @@ fn draw_transcript_pane(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_chat_pane(f: &mut Frame, app: &mut App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL);
+    let title = if app.chat_scope == ChatScope::Global {
+        " Chat — Global "
+    } else {
+        " Chat "
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -163,7 +169,7 @@ fn draw_chat_pane(f: &mut Frame, app: &mut App, area: Rect) {
         }
         lines.push(Line::default());
     }
-    if app.chat_loading {
+    if app.chat_loading() {
         lines.push(Line::from(Span::styled("thinking...", DIM)));
     }
     let content = windowed(lines, msgs_area.height as usize, app.chat_scroll);
@@ -183,6 +189,26 @@ fn draw_chat_pane(f: &mut Frame, app: &mut App, area: Rect) {
             DIM,
         ))),
         hint,
+    );
+}
+
+fn draw_summary_pane(f: &mut Frame, app: &mut App, summary: &str, area: Rect) {
+    let block = Block::default().borders(Borders::ALL).title(" Summary ");
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = if summary.is_empty() {
+        vec![Line::from(Span::styled("Generating summary...", DIM))]
+    } else {
+        render_markdown(summary, inner_w)
+    };
+    // Top-anchored scroll, clamped so the last line stays reachable.
+    let visible = area.height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(visible);
+    app.summary_scroll = app.summary_scroll.min(max_scroll);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((app.summary_scroll as u16, 0)),
+        area,
     );
 }
 
@@ -222,6 +248,10 @@ fn draw_home(f: &mut Frame, app: &mut App, area: Rect) {
         }
         let available = area.height.saturating_sub(2) as usize;
 
+        let show_summary = !app.chat_open
+            && app.summary_open
+            && (!viewing.summary.is_empty() || app.summary_pending);
+
         if app.chat_open {
             let [left, right] =
                 Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -232,6 +262,16 @@ fn draw_home(f: &mut Frame, app: &mut App, area: Rect) {
                 left,
             );
             draw_chat_pane(f, app, right);
+        } else if show_summary {
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .areas(area);
+            let content = windowed(lines, left.height.saturating_sub(2) as usize, app.scroll);
+            f.render_widget(
+                Paragraph::new(content).block(Block::default().borders(Borders::ALL)),
+                left,
+            );
+            draw_summary_pane(f, app, &viewing.summary, right);
         } else {
             let content = windowed(lines, available, app.scroll);
             f.render_widget(
@@ -278,7 +318,15 @@ fn draw_home(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(Span::styled(format!("    {meta}"), DIM)));
     }
     let block = Block::default().borders(Borders::ALL);
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    if app.chat_open {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .areas(area);
+        f.render_widget(Paragraph::new(lines).block(block), left);
+        draw_chat_pane(f, app, right);
+    } else {
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    }
 }
 
 fn draw_mic_select(f: &mut Frame, app: &App, area: Rect) {
@@ -351,11 +399,13 @@ fn draw_controls(f: &mut Frame, app: &App, area: Rect) {
         if app.viewing.is_some() {
             parts.push("[Esc] Back");
             parts.push("[N]ew Session");
+            parts.push("[S]ummary");
             parts.push(if app.chat_open { "[Esc] Close Chat" } else { "[C]hat" });
         } else {
             parts.push("↑/↓ Navigate");
             parts.push("[Enter] View");
             parts.push("[N]ew Session");
+            parts.push(if app.chat_open { "[Esc] Close Chat" } else { "[C]hat" });
             parts.push("[D]elete");
             parts.push("[Q]uit");
         }

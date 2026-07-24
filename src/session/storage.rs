@@ -106,6 +106,25 @@ impl Storage {
         Ok(())
     }
 
+    /// Missing or corrupt chat.json reads as an empty conversation.
+    pub fn load_chat(&self, folder: &Path) -> Vec<ChatMessage> {
+        fs::read_to_string(folder.join("chat.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// The global (no-session) chat lives at base_dir/chat.json; list_sessions
+    /// only looks at directories, so it never shows up as a session.
+    pub fn save_global_chat(&self, msgs: &[ChatMessage]) -> Result<()> {
+        fs::create_dir_all(&self.base_dir).context("create sessions dir")?;
+        self.save_chat(&self.base_dir, msgs)
+    }
+
+    pub fn load_global_chat(&self) -> Vec<ChatMessage> {
+        self.load_chat(&self.base_dir)
+    }
+
     /// Newest-first list of sessions with parseable metadata.json.
     pub fn list_sessions(&self) -> Vec<SessionSummary> {
         let Ok(entries) = fs::read_dir(&self.base_dir) else {
@@ -202,6 +221,53 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(folder.join("metadata.json")).unwrap())
                 .unwrap();
         assert_eq!(meta["speaker_names"]["A"], "Daniel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn chat_msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+
+    #[test]
+    fn chat_round_trip_and_forgiving_load() {
+        let dir = std::env::temp_dir().join(format!("yogurt-chat-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::new(dir.clone());
+
+        let msgs = vec![chat_msg("user", "hi"), chat_msg("assistant", "hello")];
+        storage.save_chat(&dir, &msgs).unwrap();
+
+        // Serialized with capitalized keys (Go parity).
+        let raw = std::fs::read_to_string(dir.join("chat.json")).unwrap();
+        assert!(raw.contains("\"Role\""), "capitalized keys: {raw}");
+
+        let loaded = storage.load_chat(&dir);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].role, "user");
+        assert_eq!(loaded[1].content, "hello");
+
+        // Missing folder and garbage bytes both read as empty.
+        assert!(storage.load_chat(&dir.join("nope")).is_empty());
+        std::fs::write(dir.join("chat.json"), "{not json").unwrap();
+        assert!(storage.load_chat(&dir).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn global_chat_creates_base_dir() {
+        let dir = std::env::temp_dir().join(format!("yogurt-globalchat-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let storage = Storage::new(dir.clone());
+
+        assert!(storage.load_global_chat().is_empty());
+        let msgs = vec![chat_msg("user", "hey")];
+        storage.save_global_chat(&msgs).unwrap();
+        assert_eq!(storage.load_global_chat().len(), 1);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
