@@ -250,6 +250,21 @@ fn generate_meta_headless(
         },
         Err(e) => eprintln!("Could not generate summary: {e:#}"),
     }
+
+    // Put names on diarized speakers where the conversation supports it.
+    match client.identify_speakers(&transcript) {
+        Ok(names) if !names.is_empty() => match storage.apply_speaker_names(folder, &names) {
+            Ok(n) if n > 0 => {
+                let mut who: Vec<&str> = names.values().map(|s| s.as_str()).collect();
+                who.sort();
+                println!("  speakers: {}", who.join(", "));
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("Could not apply speaker names: {e:#}"),
+        },
+        Ok(_) => {}
+        Err(e) => eprintln!("Could not identify speakers: {e:#}"),
+    }
 }
 
 fn mic_check(cfg: &Config) -> Result<()> {
