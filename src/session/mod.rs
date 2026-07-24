@@ -115,8 +115,7 @@ pub struct SessionSummary {
     pub folder: String,
     pub name: String,
     pub title: String,
-    /// Loaded from metadata.json; not currently displayed (Go parity).
-    #[allow(dead_code)]
+    /// Loaded from metadata.json; shown in the session viewer's summary pane.
     pub summary: String,
     pub start_time: Option<DateTime<Local>>,
     pub duration_secs: f64,

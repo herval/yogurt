@@ -51,6 +51,11 @@ pub struct App {
     pub viewing: Option<SessionSummary>,
     pub view_raw: String,
 
+    // Summary pane
+    pub summary_open: bool,
+    pub summary_scroll: usize,
+    pub summary_pending: bool,
+
     // Chat
     pub chat_open: bool,
     pub chat_input: TextArea<'static>,
@@ -100,6 +105,9 @@ impl App {
             session_idx: 0,
             viewing: None,
             view_raw: String::new(),
+            summary_open: true,
+            summary_scroll: 0,
+            summary_pending: false,
             chat_open: false,
             chat_input,
             chat_msgs: Vec::new(),
@@ -152,10 +160,16 @@ impl App {
                 }
                 self.cmd_load_sessions();
             }
-            AppMsg::MetaGenerated { title, err } => {
+            AppMsg::MetaGenerated { title, speakers, err } => {
                 match err {
                     Some(e) => self.set_notice(format!("Saved (could not generate title: {e})"), false),
-                    None => self.set_notice(format!("\u{201c}{title}\u{201d}"), false),
+                    None if speakers.is_empty() => {
+                        self.set_notice(format!("\u{201c}{title}\u{201d}"), false)
+                    }
+                    None => self.set_notice(
+                        format!("\u{201c}{title}\u{201d} — speakers: {}", speakers.join(", ")),
+                        false,
+                    ),
                 }
                 self.cmd_load_sessions();
             }
@@ -396,6 +410,9 @@ impl App {
                         self.viewing = Some(s);
                         self.scroll = 0;
                         self.chat_msgs.clear();
+                        self.summary_open = true;
+                        self.summary_scroll = 0;
+                        self.summary_pending = false;
                     }
                 }
             }
@@ -549,13 +566,32 @@ impl App {
                         .save_meta(&folder, &meta.title, &meta.summary)
                         .err()
                         .map(|e| format!("{e:#}"));
+                    // Identify speakers by name from conversational evidence
+                    // and rewrite the saved transcript. Best-effort.
+                    let mut speakers = Vec::new();
+                    match client.identify_speakers(&transcript) {
+                        Ok(names) if !names.is_empty() => {
+                            match mgr.storage.apply_speaker_names(&folder, &names) {
+                                Ok(n) if n > 0 => {
+                                    speakers = names.values().cloned().collect();
+                                    speakers.sort();
+                                }
+                                Ok(_) => {}
+                                Err(e) => log::warn!("apply speaker names: {e:#}"),
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::warn!("identify speakers: {e:#}"),
+                    }
                     AppMsg::MetaGenerated {
                         title: meta.title,
+                        speakers,
                         err,
                     }
                 }
                 Err(e) => AppMsg::MetaGenerated {
                     title: String::new(),
+                    speakers: Vec::new(),
                     err: Some(format!("{e:#}")),
                 },
             };

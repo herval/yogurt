@@ -131,10 +131,74 @@ impl LlmClient {
     }
 }
 
+impl LlmClient {
+    /// Infer real names for lettered speakers from conversational evidence
+    /// ("thanks, Daniel", self-introductions). Returns letter → name for
+    /// speakers with clear evidence only.
+    pub fn identify_speakers(
+        &self,
+        transcript: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if transcript.is_empty() {
+            return Ok(Default::default());
+        }
+        let prompt = format!(
+            "You are given a meeting transcript. Speakers are labeled \"Speaker A\", \
+             \"Speaker B\", etc.; \"You\" is the person who recorded the meeting.\n\
+             Identify the real names of the lettered speakers using evidence from the \
+             conversation: participants addressing each other by name, self-introductions, \
+             sign-offs. Return ONLY a JSON object mapping letters to names, and include a \
+             letter only when the evidence is clear. Example: {{\"A\": \"Daniel\", \"B\": \"Eva\"}}. \
+             Return {{}} if no names can be determined.\n\nTranscript:\n{transcript}"
+        );
+        let content = self.complete(vec![json!({"role": "user", "content": prompt})], true)?;
+        let parsed: std::collections::HashMap<String, String> =
+            serde_json::from_str(extract_json(&content))
+                .map_err(|e| anyhow!("parse speaker map: {e}"))?;
+        // Keep only sane entries: single-letter key, plausible short name.
+        Ok(parsed
+            .into_iter()
+            .filter(|(k, v)| {
+                k.len() == 1
+                    && k.chars().all(|c| c.is_ascii_uppercase())
+                    && !v.trim().is_empty()
+                    && v.len() <= 40
+                    && !v.contains('\n')
+                    && v.trim() != k
+            })
+            .map(|(k, v)| (k, v.trim().to_string()))
+            .collect())
+    }
+}
+
 /// Grab the first '{' through the last '}' — tolerates code fences and prose.
 fn extract_json(s: &str) -> &str {
     match (s.find('{'), s.rfind('}')) {
         (Some(a), Some(b)) if b > a => &s[a..=b],
         _ => s,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Manual e2e: identify+apply speakers on a saved session folder.
+    /// YOGURT_ID_FOLDER=<path> OPENAI_API_KEY=... YOGURT_ID_MODEL=... cargo test -- --ignored identify_and_apply
+    #[test]
+    #[ignore]
+    fn identify_and_apply_from_env() {
+        let folder = std::path::PathBuf::from(std::env::var("YOGURT_ID_FOLDER").unwrap());
+        let key = std::env::var("OPENAI_API_KEY").unwrap();
+        let model = std::env::var("YOGURT_ID_MODEL").unwrap_or_default();
+        let transcript = std::fs::read_to_string(folder.join("transcript.txt")).unwrap();
+        let client = LlmClient::new("openai", &key, &model);
+        let names = client.identify_speakers(&transcript).unwrap();
+        eprintln!("identified: {names:?}");
+        if !names.is_empty() {
+            let storage = crate::session::storage::Storage::new(folder.parent().unwrap().into());
+            let n = storage.apply_speaker_names(&folder, &names).unwrap();
+            eprintln!("relabeled {n} segments");
+        }
     }
 }

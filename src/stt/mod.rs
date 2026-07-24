@@ -74,10 +74,11 @@ impl Transcript {
         for s in &self.segments {
             let speaker = if s.speaker.is_empty() {
                 "Unknown".to_string()
-            } else if s.speaker == "You" {
-                "You".to_string()
-            } else {
+            } else if s.speaker.len() == 1 {
                 format!("Speaker {}", s.speaker)
+            } else {
+                // "You" or an identified real name.
+                s.speaker.clone()
             };
             out.push_str(&format!("[{}] {}:\n{}\n\n", s.format_timestamp(), speaker, s.text));
         }

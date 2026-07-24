@@ -87,10 +87,10 @@ fn transcript_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             Span::styled(
                 if tl.seg.speaker.is_empty() {
                     "Unknown".to_string()
-                } else if tl.seg.speaker == "You" {
-                    "You".to_string()
-                } else {
+                } else if tl.seg.speaker.len() == 1 {
                     format!("Speaker {}", tl.seg.speaker)
+                } else {
+                    tl.seg.speaker.clone()
                 },
                 SPEAKER_STYLE,
             ),

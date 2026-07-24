@@ -58,6 +58,49 @@ impl Storage {
         Ok(())
     }
 
+    /// Rewrite a saved session's speaker labels with identified names.
+    /// Returns how many segments were relabeled.
+    pub fn apply_speaker_names(
+        &self,
+        folder: &Path,
+        names: &std::collections::HashMap<String, String>,
+    ) -> Result<usize> {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct TranscriptJson {
+            segments: Vec<crate::stt::Segment>,
+        }
+        let path = folder.join("transcript.json");
+        let mut t: TranscriptJson = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        let mut changed = 0;
+        for seg in &mut t.segments {
+            if let Some(name) = names.get(&seg.speaker) {
+                seg.speaker = name.clone();
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            return Ok(0);
+        }
+        fs::write(&path, serde_json::to_string_pretty(&t)?)?;
+
+        let mut transcript = crate::stt::Transcript::default();
+        transcript.replace_segments(t.segments);
+        fs::write(folder.join("transcript.txt"), transcript.to_plain_text())?;
+
+        // Record the mapping in metadata for traceability.
+        let meta_path = folder.join("metadata.json");
+        let mut meta: serde_json::Map<String, Value> = fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        meta.insert(
+            "speaker_names".into(),
+            serde_json::to_value(names).unwrap_or_default(),
+        );
+        fs::write(&meta_path, serde_json::to_string_pretty(&Value::Object(meta))?)?;
+        Ok(changed)
+    }
+
     pub fn save_chat(&self, folder: &Path, msgs: &[ChatMessage]) -> Result<()> {
         fs::write(folder.join("chat.json"), serde_json::to_string_pretty(msgs)?)?;
         Ok(())
@@ -114,5 +157,51 @@ impl Storage {
     pub fn load_transcript(&self, folder: &Path) -> String {
         fs::read_to_string(folder.join("transcript.txt"))
             .unwrap_or_else(|_| "(transcript not available)".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Local;
+
+    #[test]
+    fn apply_speaker_names_rewrites_files() {
+        let dir = std::env::temp_dir().join(format!("yogurt-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::new(dir.clone());
+
+        let seg = |speaker: &str, text: &str| crate::stt::Segment {
+            text: text.into(),
+            speaker: speaker.into(),
+            start_time: 0.0,
+            end_time: 1.0,
+            confidence: 1.0,
+            is_final: true,
+            created_at: Local::now(),
+        };
+        let mut sess = crate::session::Session::new("t");
+        sess.transcript.replace_segments(vec![
+            seg("You", "hi"),
+            seg("A", "hello"),
+            seg("B", "hey"),
+        ]);
+        let folder = storage.save(&sess, &[0u8; 64000], 16000, 1).unwrap();
+
+        let mut names = std::collections::HashMap::new();
+        names.insert("A".to_string(), "Daniel".to_string());
+        let changed = storage.apply_speaker_names(&folder, &names).unwrap();
+        assert_eq!(changed, 1);
+
+        let txt = std::fs::read_to_string(folder.join("transcript.txt")).unwrap();
+        assert!(txt.contains("Daniel:"), "renamed label in txt: {txt}");
+        assert!(txt.contains("Speaker B:"), "unmapped speaker keeps letter");
+        assert!(txt.contains("You:"), "You untouched");
+
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(folder.join("metadata.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta["speaker_names"]["A"], "Daniel");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
