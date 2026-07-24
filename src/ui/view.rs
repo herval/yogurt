@@ -402,9 +402,15 @@ fn draw_controls(f: &mut Frame, app: &App, area: Rect) {
             parts.push("[S]ummary");
             parts.push(if app.chat_open { "[Esc] Close Chat" } else { "[C]hat" });
         } else {
+            let recording = matches!(app.status, Status::Recording | Status::Paused);
+            if recording {
+                parts.push("[Esc] Back to Recording");
+            }
             parts.push("↑/↓ Navigate");
             parts.push("[Enter] View");
-            parts.push("[N]ew Session");
+            if !recording {
+                parts.push("[N]ew Session");
+            }
             parts.push(if app.chat_open { "[Esc] Close Chat" } else { "[C]hat" });
             parts.push("[D]elete");
             parts.push("[Q]uit");

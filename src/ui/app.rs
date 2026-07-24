@@ -160,12 +160,20 @@ impl App {
                 stt_err,
                 err,
             } => {
-                // Flush the live chat before the quit path below can return.
-                if let (ChatScope::Live(n), Some(f)) = (&self.chat_scope, &folder) {
-                    self.finished_live = Some((*n, f.clone()));
+                // Saves are async (the close pass can take a while); if a new
+                // recording already started, don't yank its view or chat
+                // scope — the current Live scope belongs to the new session,
+                // not the one that just saved.
+                let recording_again =
+                    matches!(self.status, Status::Recording | Status::Paused);
+                if !recording_again {
+                    // Flush the live chat before the quit path below can return.
+                    if let (ChatScope::Live(n), Some(f)) = (&self.chat_scope, &folder) {
+                        self.finished_live = Some((*n, f.clone()));
+                    }
+                    self.set_chat_scope(ChatScope::Global);
+                    self.home_mode = true;
                 }
-                self.set_chat_scope(ChatScope::Global);
-                self.home_mode = true;
                 if let Some(e) = err {
                     self.set_notice(format!("Error saving: {e}"), true);
                 } else if let Some(folder) = folder {
@@ -521,9 +529,15 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                self.viewing = None;
-                self.chat_open = false;
-                self.set_chat_scope(ChatScope::Global);
+                if self.viewing.is_none()
+                    && matches!(self.status, Status::Recording | Status::Paused)
+                {
+                    self.back_to_live();
+                } else {
+                    self.viewing = None;
+                    self.chat_open = false;
+                    self.set_chat_scope(ChatScope::Global);
+                }
             }
             KeyCode::Char('c') | KeyCode::Char('C') => self.open_chat(),
             KeyCode::Char('s') | KeyCode::Char('S') => {
@@ -541,7 +555,15 @@ impl App {
                     self.summary_scroll += 1;
                 }
             }
-            KeyCode::Char('n') | KeyCode::Char('N') => self.new_session(),
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                // A session is already live — jump back to it instead of
+                // wiping the live view's state for a doomed start attempt.
+                if matches!(self.status, Status::Recording | Status::Paused) {
+                    self.back_to_live();
+                } else {
+                    self.new_session();
+                }
+            }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 if self.viewing.is_none() && !self.sessions.is_empty() {
                     self.confirm_delete = true;
@@ -623,6 +645,14 @@ impl App {
             self.set_notice("Generating summary...", false);
             self.cmd_generate_meta(folder, self.view_raw.clone());
         }
+    }
+
+    /// Return from the home list to an in-progress recording's live view.
+    fn back_to_live(&mut self) {
+        self.home_mode = false;
+        self.viewing = None;
+        self.chat_open = false;
+        self.set_chat_scope(ChatScope::Live(self.live_seq));
     }
 
     fn new_session(&mut self) {
