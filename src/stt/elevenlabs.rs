@@ -498,7 +498,12 @@ fn to_segments(resp: ElevenLabsResponse, multichannel: bool) -> Vec<Segment> {
 
     for w in words {
         if let Some(prev) = group.last() {
-            if prev.speaker_id != w.speaker_id {
+            // Split on silence gaps too: the remote channel of a 1:1 call
+            // has a single speaker, and without gap splits their whole side
+            // collapses into one segment spanning the entire recording.
+            if prev.speaker_id != w.speaker_id
+                || w.start - prev.end > MAX_UTTERANCE_GAP_SECS
+            {
                 flush(&mut group, &mut segments);
             }
         }
@@ -610,6 +615,52 @@ mod tests {
         assert!(left.chunks_exact(2).all(|c| i16::from_le_bytes([c[0], c[1]]) == 1));
         assert!(right.chunks_exact(2).all(|c| i16::from_le_bytes([c[0], c[1]]) == 2));
         assert_eq!(left.len(), pcm.len() / 2);
+    }
+
+    fn word(text: &str, start: f64, end: f64, speaker_id: &str) -> ElWord {
+        ElWord {
+            text: text.into(),
+            kind: "word".into(),
+            start,
+            end,
+            speaker_id: speaker_id.into(),
+        }
+    }
+
+    #[test]
+    fn mono_single_speaker_splits_on_gaps() {
+        // One diarized speaker across a long recording must split into
+        // utterances at silence gaps, not collapse into one segment.
+        let resp = ElevenLabsResponse {
+            text: String::new(),
+            words: vec![
+                word("hello", 0.0, 0.5, "speaker_0"),
+                word("there", 0.6, 1.0, "speaker_0"),
+                // 5s gap — the other party (not on this channel) was talking
+                word("right", 6.0, 6.4, "speaker_0"),
+                word("okay", 6.5, 7.0, "speaker_0"),
+            ],
+        };
+        let segs = to_segments(resp, false);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].text, "hello there");
+        assert_eq!(segs[1].text, "right okay");
+        assert!(segs.iter().all(|s| s.speaker == "A"));
+    }
+
+    #[test]
+    fn mono_still_splits_on_speaker_change() {
+        let resp = ElevenLabsResponse {
+            text: String::new(),
+            words: vec![
+                word("hi", 0.0, 0.3, "speaker_0"),
+                word("hey", 0.4, 0.7, "speaker_1"),
+            ],
+        };
+        let segs = to_segments(resp, false);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].speaker, "A");
+        assert_eq!(segs[1].speaker, "B");
     }
 
     #[test]
