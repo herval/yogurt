@@ -37,6 +37,10 @@ const MIN_WINDOW_SECS: usize = 2;
 const LIVE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Timeout for close-pass uploads (can cover a whole meeting).
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(900);
+/// Failed live windows are rewound and retried in the next window, until the
+/// backlog reaches this size — a long outage shouldn't re-upload an
+/// ever-growing payload every interval.
+const LIVE_RETRY_MAX_SECS: usize = 120;
 
 pub struct ElevenLabsClient {
     api: Arc<Api>,
@@ -139,6 +143,7 @@ impl ElevenLabsClient {
         let channels = self.channels;
         let in_flight = Arc::clone(&live.in_flight);
         let delivered = Arc::clone(&live.delivered);
+        let consumed = Arc::clone(&live.consumed);
         let live_you = Arc::clone(&self.live_you);
         let offset_secs = start as f64 / (sample_rate as f64 * 2.0 * channels as f64);
         std::thread::spawn(move || {
@@ -156,11 +161,16 @@ impl ElevenLabsClient {
                     }
                 }
                 Err(e) => {
-                    // Live windows are best-effort; the close() pass patches
-                    // the remote side, but a failed window loses its "You"
-                    // coverage in stereo mode — tell the UI, not just the log.
                     log::warn!("live transcription window failed: {e}");
                     (callbacks.on_error)(format!("live transcription failed: {e}"));
+                    // Rewind so the next window retries this audio: a
+                    // transient blip then loses nothing. Safe because
+                    // in_flight serializes windows, and it's released after.
+                    let max_retry =
+                        LIVE_RETRY_MAX_SECS * sample_rate as usize * 2 * channels as usize;
+                    if window.len() <= max_retry {
+                        consumed.store(start, Ordering::SeqCst);
+                    }
                 }
             }
             in_flight.store(false, Ordering::SeqCst);

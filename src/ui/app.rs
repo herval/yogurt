@@ -257,6 +257,11 @@ impl App {
     fn handle_session_event(&mut self, ev: SessionEvent) {
         match ev {
             SessionEvent::Segment(seg) => {
+                // STT delivering again means a mid-recording error (failed
+                // live window) healed itself — stop showing it.
+                if seg.is_final && self.notice_err && self.status == Status::Recording {
+                    self.set_notice("", false);
+                }
                 if seg.is_final {
                     if let Some(idx) = self.partial_idx.take() {
                         self.lines[idx] = TranscriptLine { seg, partial: false };
