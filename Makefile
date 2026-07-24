@@ -1,7 +1,8 @@
 MODEL ?= base
-# Ad-hoc by default; set to a stable identity (e.g. "yogurt-dev") so mic
-# permission survives rebuilds: make build SIGN_ID=yogurt-dev
-SIGN_ID ?= -
+# A stable signing identity so the microphone grant survives rebuilds; ad-hoc
+# ("-") gets a new code identity every build, so macOS re-prompts each time.
+# Override with your own: make build SIGN_ID=yogurt-dev
+SIGN_ID ?= muxterm-local
 # Extra cargo features, e.g. FEATURES=whisper
 FEATURES ?=
 
