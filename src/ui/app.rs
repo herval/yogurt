@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::llm::client::{ChatMessage, LlmClient};
 use crate::llm::templates::Template;
 use crate::session::manager::Manager;
+use crate::settings::Settings;
 use crate::session::{SessionEvent, SessionSummary, Status};
 use crate::stt::Segment;
 
@@ -82,6 +83,11 @@ pub struct App {
     pub template_open: bool,
     pub template_idx: usize,
 
+    // Settings page (glossary editor)
+    pub settings: Settings,
+    pub settings_open: bool,
+    pub settings_input: TextArea<'static>,
+
     pub confirm_delete: bool,
 
     quitting: bool,
@@ -98,6 +104,7 @@ impl App {
     ) -> App {
         let chat_input = new_chat_input("Ask anything...");
         let chat_msgs = mgr.storage.load_global_chat();
+        let settings = Settings::load();
         App {
             mgr,
             devices,
@@ -132,6 +139,9 @@ impl App {
             templates,
             template_open: false,
             template_idx: 0,
+            settings_input: new_chat_input(""),
+            settings,
+            settings_open: false,
             confirm_delete: false,
             quitting: false,
             should_quit: false,
@@ -314,10 +324,57 @@ impl App {
             self.handle_confirm_delete_key(key);
         } else if self.template_open {
             self.handle_template_key(key);
+        } else if self.settings_open {
+            self.handle_settings_key(key);
         } else if self.chat_open {
             self.handle_chat_key(key);
         } else {
             self.handle_base_key(key);
+        }
+    }
+
+    fn open_settings(&mut self) {
+        let lines: Vec<String> = if self.settings.glossary.is_empty() {
+            vec![String::new()]
+        } else {
+            self.settings.glossary.lines().map(String::from).collect()
+        };
+        let mut ta = TextArea::new(lines);
+        ta.set_cursor_line_style(ratatui::style::Style::default());
+        ta.set_placeholder_text(
+            "One term or phrase per line — names, products, jargon (# for comments)",
+        );
+        self.settings_input = ta;
+        self.settings_open = true;
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Cancel: discard edits, keep the saved glossary.
+                self.settings_open = false;
+            }
+            KeyCode::Esc => self.save_settings(),
+            _ => {
+                self.settings_input.input(key);
+            }
+        }
+    }
+
+    fn save_settings(&mut self) {
+        self.settings.glossary = self.settings_input.lines().join("\n");
+        self.settings_open = false;
+        let terms = self.settings.keyterms();
+        let n = terms.len();
+        // Applies to the next recording; also feeds the LLM prompts via
+        // self.settings on the next title/summary/chat call.
+        self.mgr.set_keyterms(terms);
+        match self.settings.save() {
+            Ok(()) => self.set_notice(
+                format!("Glossary saved — {n} term{}", if n == 1 { "" } else { "s" }),
+                false,
+            ),
+            Err(e) => self.set_notice(format!("Could not save glossary: {e}"), true),
         }
     }
 
@@ -543,6 +600,8 @@ impl App {
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 if self.viewing.is_some() {
                     self.toggle_summary();
+                } else {
+                    self.open_settings();
                 }
             }
             KeyCode::PageUp => {
@@ -742,7 +801,8 @@ impl App {
             &self.cfg.llm_provider,
             &self.cfg.llm_api_key,
             &self.cfg.llm_model,
-        );
+        )
+        .with_glossary(self.settings.llm_prompt());
         std::thread::spawn(move || {
             let msg = match client.generate_meta(&transcript) {
                 Ok(meta) => {
@@ -813,7 +873,8 @@ impl App {
             &self.cfg.llm_provider,
             &self.cfg.llm_api_key,
             &self.cfg.llm_model,
-        );
+        )
+        .with_glossary(self.settings.llm_prompt());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let msg = match client.ask(&system, &history, &user_msg) {

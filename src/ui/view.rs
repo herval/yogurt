@@ -43,7 +43,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_header(f, app, header);
 
-    if app.home_mode {
+    if app.settings_open {
+        draw_settings(f, app, pane);
+    } else if app.home_mode {
         draw_home(f, app, pane);
     } else {
         draw_live(f, app, pane);
@@ -356,6 +358,34 @@ fn draw_mic_select(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
+fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Settings · Glossary ", TITLE_STYLE));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let [help, editor] =
+        Layout::vertical([Constraint::Length(4), Constraint::Min(1)]).areas(inner);
+
+    let help_lines = vec![
+        Line::from(Span::styled(
+            "Corrects mis-heard words: fed to speech-to-text (keyterm biasing) and the AI.",
+            DIM,
+        )),
+        Line::from(Span::styled(
+            "One term or phrase per line — names, products, jargon.  # starts a comment.",
+            DIM,
+        )),
+        Line::from(Span::styled(
+            "Applies to the next recording.",
+            DIM,
+        )),
+    ];
+    f.render_widget(Paragraph::new(help_lines), help);
+    f.render_widget(&app.settings_input, editor);
+}
+
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let words = app
         .mgr
@@ -394,6 +424,14 @@ fn level_meter(level: f64) -> Vec<Span<'static>> {
 }
 
 fn draw_controls(f: &mut Frame, app: &App, area: Rect) {
+    if app.settings_open {
+        let parts = ["[Esc] Save & close", "[Ctrl+C] Cancel"];
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(parts.join(" │ "), DIM))),
+            area,
+        );
+        return;
+    }
     let mut parts: Vec<&str> = Vec::new();
     if app.home_mode {
         if app.viewing.is_some() {
@@ -412,6 +450,7 @@ fn draw_controls(f: &mut Frame, app: &App, area: Rect) {
                 parts.push("[N]ew Session");
             }
             parts.push(if app.chat_open { "[Esc] Close Chat" } else { "[C]hat" });
+            parts.push("[S]ettings");
             parts.push("[D]elete");
             parts.push("[Q]uit");
         }

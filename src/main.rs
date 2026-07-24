@@ -3,6 +3,7 @@ mod config;
 mod disclaim;
 mod llm;
 mod session;
+mod settings;
 mod stt;
 mod ui;
 
@@ -115,6 +116,7 @@ fn main() {
             sample_rate: cfg.sample_rate,
             device_index: cfg.audio_device,
             sessions_dir: cfg.abs_sessions_dir(),
+            keyterms: settings::Settings::load().keyterms(),
         },
         events_tx,
     );
@@ -242,7 +244,8 @@ fn generate_meta_headless(
         return;
     }
     println!("Generating title & summary...");
-    let client = llm::client::LlmClient::new(&cfg.llm_provider, &cfg.llm_api_key, &cfg.llm_model);
+    let client = llm::client::LlmClient::new(&cfg.llm_provider, &cfg.llm_api_key, &cfg.llm_model)
+        .with_glossary(settings::Settings::load().llm_prompt());
     match client.generate_meta(&transcript) {
         Ok(meta) => match storage.save_meta(folder, &meta.title, &meta.summary) {
             Ok(()) => println!("  \u{201c}{}\u{201d}", meta.title),

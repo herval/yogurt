@@ -116,6 +116,7 @@ pub fn new_stt_client(
     sample_rate: u32,
     channels: u16,
     model: &str,
+    keyterms: Vec<String>,
     callbacks: SttCallbacks,
 ) -> Box<dyn SttClient> {
     match provider {
@@ -124,6 +125,7 @@ pub fn new_stt_client(
             sample_rate,
             channels,
             model,
+            keyterms,
             callbacks,
         )),
         "whisper" => new_whisper_client(sample_rate, model, callbacks),

@@ -26,6 +26,8 @@ pub struct ManagerConfig {
     pub sample_rate: u32,
     pub device_index: i32,
     pub sessions_dir: PathBuf,
+    /// Glossary terms biasing STT (ElevenLabs keyterms). Editable at runtime.
+    pub keyterms: Vec<String>,
 }
 
 struct Active {
@@ -42,6 +44,9 @@ struct Active {
 pub struct Manager {
     cfg: ManagerConfig,
     device_index: AtomicI32,
+    /// STT keyterms, swappable at runtime when the glossary is edited. Read at
+    /// session start, so edits take effect on the next recording.
+    keyterms: Mutex<Vec<String>>,
     events: mpsc::Sender<SessionEvent>,
     pub storage: Storage,
     active: Mutex<Option<Active>>,
@@ -51,9 +56,11 @@ impl Manager {
     pub fn new(cfg: ManagerConfig, events: mpsc::Sender<SessionEvent>) -> Arc<Manager> {
         let storage = Storage::new(cfg.sessions_dir.clone());
         let device_index = AtomicI32::new(cfg.device_index);
+        let keyterms = Mutex::new(cfg.keyterms.clone());
         Arc::new(Manager {
             cfg,
             device_index,
+            keyterms,
             events,
             storage,
             active: Mutex::new(None),
@@ -62,6 +69,10 @@ impl Manager {
 
     pub fn set_device_index(&self, idx: i32) {
         self.device_index.store(idx, Ordering::SeqCst);
+    }
+
+    pub fn set_keyterms(&self, terms: Vec<String>) {
+        *self.keyterms.lock().unwrap() = terms;
     }
 
     fn emit(&self, ev: SessionEvent) {
@@ -115,12 +126,14 @@ impl Manager {
                 log::info!("disconnected from STT provider ({provider2})");
             }),
         };
+        let keyterms = self.keyterms.lock().unwrap().clone();
         Arc::new(Mutex::new(new_stt_client(
             &self.cfg.stt_provider,
             &self.cfg.stt_api_key,
             sample_rate,
             channels,
             &self.cfg.stt_model,
+            keyterms,
             callbacks,
         )))
     }

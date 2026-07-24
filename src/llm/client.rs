@@ -28,6 +28,9 @@ pub struct LlmClient {
     api_key: String,
     model: String,
     base_url: String,
+    /// Optional glossary instruction block (see settings::Settings::llm_prompt),
+    /// prepended to prompts so derived text uses canonical spellings.
+    glossary: Option<String>,
 }
 
 impl LlmClient {
@@ -42,6 +45,22 @@ impl LlmClient {
             api_key: api_key.to_string(),
             model: if model.is_empty() { "gpt-4o-mini".into() } else { model.into() },
             base_url,
+            glossary: None,
+        }
+    }
+
+    /// Attach a glossary instruction block; `None` leaves prompts unchanged.
+    pub fn with_glossary(mut self, glossary: Option<String>) -> Self {
+        self.glossary = glossary;
+        self
+    }
+
+    /// The glossary block followed by a blank line, or "" when unset — safe to
+    /// splice into a prompt unconditionally.
+    fn glossary_prefix(&self) -> String {
+        match &self.glossary {
+            Some(g) if !g.trim().is_empty() => format!("{g}\n\n"),
+            _ => String::new(),
         }
     }
 
@@ -93,6 +112,7 @@ impl LlmClient {
     }
 
     pub fn ask(&self, system: &str, history: &[ChatMessage], user: &str) -> Result<String> {
+        let system = format!("{}{system}", self.glossary_prefix());
         let mut messages = vec![json!({"role": "system", "content": system})];
         for m in history {
             messages.push(json!({"role": m.role, "content": m.content}));
@@ -110,7 +130,8 @@ impl LlmClient {
              - \"title\": a concise meeting title, max 8 words\n\
              - \"summary\": a 2-3 sentence summary of the key points discussed\n\n\
              Example: {{\"title\": \"Q1 Planning\", \"summary\": \"The team discussed...\"}}\n\n\
-             Transcript:\n{transcript}"
+             {glossary}Transcript:\n{transcript}",
+            glossary = self.glossary_prefix()
         );
         let content = self.complete(vec![json!({"role": "user", "content": prompt})], true)?;
         let json_str = extract_json(&content);
@@ -149,7 +170,8 @@ impl LlmClient {
              conversation: participants addressing each other by name, self-introductions, \
              sign-offs. Return ONLY a JSON object mapping letters to names, and include a \
              letter only when the evidence is clear. Example: {{\"A\": \"Daniel\", \"B\": \"Eva\"}}. \
-             Return {{}} if no names can be determined.\n\nTranscript:\n{transcript}"
+             Return {{}} if no names can be determined.\n\n{glossary}Transcript:\n{transcript}",
+            glossary = self.glossary_prefix()
         );
         let content = self.complete(vec![json!({"role": "user", "content": prompt})], true)?;
         let parsed: std::collections::HashMap<String, String> =

@@ -59,6 +59,8 @@ pub struct ElevenLabsClient {
 struct Api {
     api_key: String,
     model: String,
+    /// Glossary terms biasing transcription (Scribe v2 only).
+    keyterms: Vec<String>,
 }
 
 struct LiveState {
@@ -77,6 +79,7 @@ impl ElevenLabsClient {
         sample_rate: u32,
         channels: u16,
         model: &str,
+        keyterms: Vec<String>,
         callbacks: SttCallbacks,
     ) -> Self {
         let live_secs = std::env::var("YOGURT_ELEVENLABS_LIVE_SECS")
@@ -94,6 +97,7 @@ impl ElevenLabsClient {
             api: Arc::new(Api {
                 api_key: api_key.to_string(),
                 model: if model.is_empty() { "scribe_v1".into() } else { model.into() },
+                keyterms,
             }),
             sample_rate,
             channels,
@@ -342,6 +346,17 @@ impl Api {
             field("multichannel_output_style", "combined");
         } else {
             field("diarize", "true");
+        }
+        // Keyterm biasing is a Scribe v2 feature (adds a ~20-30% surcharge per
+        // call). One repeated `keyterms` form field per term, matching how the
+        // API decodes an array-of-strings field. YOGURT_STT_KEYTERMS=0 opts out.
+        let keyterms_enabled = std::env::var("YOGURT_STT_KEYTERMS")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if keyterms_enabled && self.model.contains("v2") {
+            for term in &self.keyterms {
+                field("keyterms", term);
+            }
         }
         body.extend_from_slice(
             format!(
