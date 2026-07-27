@@ -318,6 +318,7 @@ impl App {
                     Status::Idle | Status::Finished => {
                         self.duration = "00:00:00".into();
                         self.audio_level = 0.0;
+                        if s == Status::Idle { self.home_mode = true; }
                     }
                     Status::Recording => self.home_mode = false,
                     _ => {}
@@ -675,6 +676,13 @@ impl App {
 
     fn handle_live_key(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Esc => {
+                if matches!(self.status, Status::Finished | Status::Idle) {
+                    self.home_mode = true;
+                    self.viewing = None;
+                    self.set_chat_scope(ChatScope::Global);
+                }
+            }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 if matches!(self.status, Status::Idle | Status::Finished) {
                     self.new_session();
@@ -688,6 +696,11 @@ impl App {
             KeyCode::Char('f') | KeyCode::Char('F') => {
                 if matches!(self.status, Status::Recording | Status::Paused) {
                     self.cmd_finish();
+                }
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                if matches!(self.status, Status::Recording | Status::Paused) {
+                    self.cmd_cancel_session();
                 }
             }
             KeyCode::Char('m') | KeyCode::Char('M') => {
@@ -831,6 +844,16 @@ impl App {
                 },
             };
             let _ = tx.send(msg);
+        });
+    }
+
+    fn cmd_cancel_session(&self) {
+        let mgr = Arc::clone(&self.mgr);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            mgr.cancel();
+            let _ = tx.send(AppMsg::Session(SessionEvent::Status(Status::Idle)));
+            let _ = tx.send(AppMsg::Session(SessionEvent::Notice("Recording discarded".into())));
         });
     }
 

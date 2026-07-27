@@ -493,14 +493,17 @@ fn draw_controls(f: &mut Frame, app: &App, area: Rect) {
         }
     } else {
         match app.status {
-            Status::Idle | Status::Finished => parts.push("[N]ew Session"),
+            Status::Idle => parts.push("[N]ew Session"),
+            Status::Finished => { parts.push("[Esc] Back"); parts.push("[N]ew Session"); }
             Status::Recording => {
                 parts.push("[P]ause");
                 parts.push("[F]inish");
+                parts.push("[X] Discard");
             }
             Status::Paused => {
                 parts.push("[P] Resume");
                 parts.push("[F]inish");
+                parts.push("[X] Discard");
             }
         }
         if app.status != Status::Recording {
