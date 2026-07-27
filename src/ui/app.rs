@@ -191,7 +191,10 @@ impl App {
                         self.finished_live = Some((*n, f.clone()));
                     }
                     self.set_chat_scope(ChatScope::Global);
-                    self.home_mode = true;
+                    // Batch local models deliver their transcript during finish;
+                    // keep that finished transcript visible instead of jumping
+                    // straight to the session list.
+                    self.home_mode = !self.settings.stt_model.starts_with("parakeet/");
                 }
                 if let Some(e) = err {
                     self.set_notice(format!("Error saving: {e}"), true);
