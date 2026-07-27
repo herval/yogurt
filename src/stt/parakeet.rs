@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use chrono::Local;
@@ -20,6 +21,9 @@ pub struct ParakeetClient {
     callbacks: SttCallbacks,
     audio_buf: Mutex<Vec<u8>>,
     closed: Mutex<bool>,
+    last_flush: Mutex<Instant>,
+    consumed: Mutex<usize>,
+    delivered: Mutex<bool>,
 }
 
 impl ParakeetClient {
@@ -30,6 +34,9 @@ impl ParakeetClient {
             callbacks,
             audio_buf: Mutex::new(Vec::new()),
             closed: Mutex::new(false),
+            last_flush: Mutex::new(Instant::now()),
+            consumed: Mutex::new(0),
+            delivered: Mutex::new(false),
         }
     }
 
@@ -109,6 +116,23 @@ impl SttClient for ParakeetClient {
 
     fn send_audio(&self, pcm: &[u8]) -> Result<()> {
         self.audio_buf.lock().unwrap().extend_from_slice(pcm);
+        let mut last = self.last_flush.lock().unwrap();
+        if last.elapsed() >= Duration::from_secs(10) {
+            let mut consumed = self.consumed.lock().unwrap();
+            let buf = self.audio_buf.lock().unwrap();
+            let start = *consumed;
+            if buf.len().saturating_sub(start) >= SAMPLE_RATE as usize * 2 * 5 {
+                let window = buf[start..].to_vec();
+                drop(buf);
+                let offset = start as f64 / (SAMPLE_RATE as f64 * 2.0);
+                let mut segments = self.transcribe(&window)?;
+                for seg in &mut segments { seg.start_time += offset; seg.end_time += offset; }
+                for seg in segments { (self.callbacks.on_segment)(seg); }
+                *consumed = start + window.len();
+                *self.delivered.lock().unwrap() = true;
+            }
+            *last = Instant::now();
+        }
         Ok(())
     }
 
@@ -123,9 +147,9 @@ impl SttClient for ParakeetClient {
         let buf = std::mem::take(&mut *self.audio_buf.lock().unwrap());
 
         let result = (|| -> Result<()> {
-            for seg in self.transcribe(&buf)? {
-                (self.callbacks.on_segment)(seg);
-            }
+            let segments = self.transcribe(&buf)?;
+            if *self.delivered.lock().unwrap() { (self.callbacks.on_replace)(segments); }
+            else { for seg in segments { (self.callbacks.on_segment)(seg); } }
             Ok(())
         })();
 
