@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::session::Status;
+use crate::settings;
 
 use super::app::App;
 use super::markdown::render_markdown;
@@ -61,6 +62,25 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.confirm_delete {
         draw_confirm_delete(f, app, area);
     }
+    if app.stt_picker_open {
+        draw_stt_picker(f, app, area);
+    }
+}
+
+fn draw_stt_picker(f: &mut Frame, app: &App, area: Rect) {
+    let w = area.width.min(80); let h = (settings::stt_profiles().len() as u16 + 5).min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2; let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect::new(x, y, w, h);
+    f.render_widget(Clear, rect);
+    let mut lines = vec![Line::from(Span::styled("Choose the model for new recordings", TITLE_STYLE))];
+    for (i, p) in settings::stt_profiles().iter().enumerate() {
+        let marker = if i == app.stt_idx { "▶" } else { " " };
+        let availability = if p.local { if settings::stt_profile_available(*p) { "installed" } else { "not installed" } } else { "API" };
+        lines.push(Line::from(format!("{marker} {:<40} [{}]", p.label, availability)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("↑/↓ select   Enter save   Esc cancel", DIM)));
+    f.render_widget(Paragraph::new(lines).block(Block::default().title(" STT model ").borders(Borders::ALL)), rect);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -361,12 +381,29 @@ fn draw_mic_select(f: &mut Frame, app: &App, area: Rect) {
 fn draw_settings(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" Settings · Glossary ", TITLE_STYLE));
+        .title(Span::styled(" Settings ", TITLE_STYLE));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let [help, editor] =
-        Layout::vertical([Constraint::Length(4), Constraint::Min(1)]).areas(inner);
+    let [tabs, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
+    let tab_line = Line::from(vec![
+        Span::styled(if app.settings_tab == 0 { " Glossary " } else { " Glossary " }, if app.settings_tab == 0 { TITLE_STYLE } else { DIM }),
+        Span::raw("  "),
+        Span::styled(" STT Model ", if app.settings_tab == 1 { TITLE_STYLE } else { DIM }),
+    ]);
+    f.render_widget(Paragraph::new(tab_line), tabs);
+    if app.settings_tab == 1 {
+        let mut lines = vec![Line::from(Span::styled("Speech-to-text model for new recordings:", DIM))];
+        for (i, p) in settings::stt_profiles().iter().enumerate() {
+            let marker = if i == app.stt_idx { "▶" } else { " " };
+            let availability = if p.local { if settings::stt_profile_available(*p) { "installed" } else { "not installed" } } else { "API" };
+            lines.push(Line::from(format!("{marker} {:<40} [{}]", p.label, availability)));
+        }
+        lines.push(Line::from(Span::styled("Use ↑/↓, Enter to save; ←/→ or 1/2 switches tabs.", DIM)));
+        f.render_widget(Paragraph::new(lines), body);
+        return;
+    }
+    let [help, editor] = Layout::vertical([Constraint::Length(4), Constraint::Min(1)]).areas(body);
 
     let help_lines = vec![
         Line::from(Span::styled(
@@ -425,7 +462,7 @@ fn level_meter(level: f64) -> Vec<Span<'static>> {
 
 fn draw_controls(f: &mut Frame, app: &App, area: Rect) {
     if app.settings_open {
-        let parts = ["[Esc] Save & close", "[Ctrl+C] Cancel"];
+        let parts = ["[1/2] Tabs", "[Esc] Save & close", "[Ctrl+C] Cancel"];
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(parts.join(" │ "), DIM))),
             area,

@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::llm::client::{ChatMessage, LlmClient};
 use crate::llm::templates::Template;
 use crate::session::manager::Manager;
-use crate::settings::Settings;
+use crate::settings::{self, Settings};
 use crate::session::{SessionEvent, SessionSummary, Status};
 use crate::stt::Segment;
 
@@ -87,6 +87,9 @@ pub struct App {
     pub settings: Settings,
     pub settings_open: bool,
     pub settings_input: TextArea<'static>,
+    pub settings_tab: usize,
+    pub stt_picker_open: bool,
+    pub stt_idx: usize,
 
     pub confirm_delete: bool,
 
@@ -104,7 +107,10 @@ impl App {
     ) -> App {
         let chat_input = new_chat_input("Ask anything...");
         let chat_msgs = mgr.storage.load_global_chat();
-        let settings = Settings::load();
+        let mut settings = Settings::load();
+        if settings.stt_model.is_empty() {
+            settings.stt_model = format!("{}/{}", cfg.stt_provider, cfg.stt_model);
+        }
         App {
             mgr,
             devices,
@@ -142,6 +148,9 @@ impl App {
             settings_input: new_chat_input(""),
             settings,
             settings_open: false,
+            settings_tab: 0,
+            stt_picker_open: false,
+            stt_idx: 0,
             confirm_delete: false,
             quitting: false,
             should_quit: false,
@@ -324,6 +333,8 @@ impl App {
             self.handle_confirm_delete_key(key);
         } else if self.template_open {
             self.handle_template_key(key);
+        } else if self.stt_picker_open {
+            self.handle_stt_picker_key(key);
         } else if self.settings_open {
             self.handle_settings_key(key);
         } else if self.chat_open {
@@ -345,10 +356,36 @@ impl App {
             "One term or phrase per line — names, products, jargon (# for comments)",
         );
         self.settings_input = ta;
+        self.settings_tab = 0;
         self.settings_open = true;
     }
 
+    fn handle_stt_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.stt_picker_open = false,
+            KeyCode::Up | KeyCode::Char('k') => { self.stt_idx = self.stt_idx.saturating_sub(1); }
+            KeyCode::Down | KeyCode::Char('j') => { self.stt_idx = (self.stt_idx + 1).min(settings::stt_profiles().len().saturating_sub(1)); }
+            KeyCode::Enter => {
+                let p = settings::stt_profiles()[self.stt_idx];
+                self.settings.stt_model = p.id.to_string();
+                if let Err(e) = self.settings.save() { self.set_notice(format!("Could not save STT model: {e}"), true); }
+                else { self.set_notice(format!("STT model set to {}", p.label), false); }
+                self.stt_picker_open = false;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_settings_key(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Char('1') | KeyCode::Char('2')) {
+            self.settings_tab = match key.code { KeyCode::Left | KeyCode::Char('1') => 0, _ => 1 };
+            return;
+        }
+        if self.settings_tab == 1 {
+            self.handle_stt_picker_key(key);
+            if key.code == KeyCode::Esc { self.settings_open = false; }
+            return;
+        }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // Cancel: discard edits, keep the saved glossary.
@@ -753,8 +790,11 @@ impl App {
     fn cmd_start_session(&self) {
         let tx = self.tx.clone();
         let mgr = Arc::clone(&self.mgr);
+        let profile = settings::stt_profile(&self.settings.stt_model);
+        let (provider, model, key) = profile.map(|p| (p.provider.to_string(), p.model.to_string(), self.cfg.api_key_for(p.provider)))
+            .unwrap_or_else(|| (self.cfg.stt_provider.clone(), self.cfg.stt_model.clone(), self.cfg.stt_api_key.clone()));
         std::thread::spawn(move || {
-            if let Err(e) = mgr.start_session("") {
+            if let Err(e) = mgr.start_session_with_stt("", &provider, &key, &model) {
                 let _ = tx.send(AppMsg::Session(SessionEvent::Error(format!("{e:#}"))));
             }
         });

@@ -13,7 +13,7 @@ are captured too), transcribes with speaker detection, and lets you chat
 with the transcript using AI. With ElevenLabs, recordings are stereo — your
 mic on the left, the meeting on the right — so the transcript labels your
 lines as "You" and remote speech by channel. Mono providers (AssemblyAI,
-whisper) get a mixed-down stream with acoustic diarization instead.
+whisper, Parakeet) get a mixed-down stream with acoustic diarization instead.
 
 ---
 
@@ -61,7 +61,11 @@ builds and runs in one step.
 
 ### Supported providers
 
-**STT:** `assemblyai` (streaming, default), `elevenlabs` (batch), `whisper` (local — run `make setup MODEL=base` once to download the model and build with whisper support; requires `cmake`)
+**STT:** `assemblyai` (streaming, default), `elevenlabs` (batch), `whisper` (local), `parakeet` (local multilingual TDT v3). Whisper requires `cmake`; Parakeet requires an ONNX model download and runs in batch mode at close.
+
+In the interactive app, press **T** from the home screen to choose the STT
+profile for new recordings. The choice is saved under `~/.yogurt/stt_model`;
+an explicit `STT_MODEL` environment variable still takes precedence.
 
 **LLM:** `openai` (default), `gemini`, `anthropic`
 
@@ -70,11 +74,19 @@ builds and runs in one step.
 STT_MODEL=assemblyai/universal-streaming-multilingual  ASSEMBLYAI_API_KEY=...
 STT_MODEL=elevenlabs/scribe_v1                         ELEVENLABS_API_KEY=...
 STT_MODEL=whisper/base                                 # no key, local model
+STT_MODEL=parakeet/v3                                  # no key, local multilingual model
 
 LLM_MODEL=openai/gpt-4o-mini                           OPENAI_API_KEY=...
 LLM_MODEL=gemini/gemini-2.0-flash                      GEMINI_API_KEY=...
 LLM_MODEL=anthropic/claude-3-5-haiku-20241022          ANTHROPIC_API_KEY=...
 ```
+
+For Parakeet, run `make setup-parakeet` once. This downloads the ONNX export
+of [NVIDIA Parakeet TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
+to `~/.yogurt/parakeet/parakeet-tdt-0.6b-v3`, then builds with the `parakeet`
+feature. Use `STT_MODEL=parakeet/v3 ./yogurt` to transcribe locally without an
+STT API key. `STT_MODEL=parakeet/path:/absolute/model-dir` can select another
+compatible ONNX directory.
 
 ## Usage
 

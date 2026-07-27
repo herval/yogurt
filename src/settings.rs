@@ -23,6 +23,39 @@ const MAX_KEYTERM_SPACES: usize = 4;
 pub struct Settings {
     /// Raw glossary text, exactly as the user typed it.
     pub glossary: String,
+    pub stt_model: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SttProfile {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub provider: &'static str,
+    pub model: &'static str,
+    pub local: bool,
+}
+
+pub fn stt_profiles() -> &'static [SttProfile] {
+    &[
+        SttProfile { id: "assemblyai/universal-streaming-multilingual", label: "AssemblyAI — Universal Streaming", provider: "assemblyai", model: "universal-streaming-multilingual", local: false },
+        SttProfile { id: "elevenlabs/scribe_v1", label: "ElevenLabs — Scribe", provider: "elevenlabs", model: "scribe_v1", local: false },
+        SttProfile { id: "whisper/base", label: "Whisper — Base (local)", provider: "whisper", model: "base", local: true },
+        SttProfile { id: "parakeet/v3", label: "Parakeet — TDT v3 (local)", provider: "parakeet", model: "v3", local: true },
+    ]
+}
+
+pub fn stt_profile(id: &str) -> Option<SttProfile> { stt_profiles().iter().copied().find(|p| p.id == id) }
+
+pub fn stt_profile_available(profile: SttProfile) -> bool {
+    if !profile.local { return true; }
+    if (profile.provider == "whisper" && !cfg!(feature = "whisper"))
+        || (profile.provider == "parakeet" && !cfg!(feature = "parakeet")) { return false; }
+    let base = dirs::home_dir().unwrap_or_default().join(".yogurt");
+    match profile.provider {
+        "whisper" => base.join("whisper").join(format!("ggml-{}.bin", profile.model)).is_file(),
+        "parakeet" => base.join("parakeet").join("parakeet-tdt-0.6b-v3").join("encoder-model.onnx").is_file(),
+        _ => false,
+    }
 }
 
 pub fn glossary_path() -> PathBuf {
@@ -32,10 +65,13 @@ pub fn glossary_path() -> PathBuf {
         .join("glossary.txt")
 }
 
+pub fn stt_model_path() -> PathBuf { glossary_path().with_file_name("stt_model") }
+
 impl Settings {
     pub fn load() -> Settings {
         Settings {
             glossary: std::fs::read_to_string(glossary_path()).unwrap_or_default(),
+            stt_model: std::fs::read_to_string(stt_model_path()).unwrap_or_default().trim().to_string(),
         }
     }
 
@@ -45,6 +81,7 @@ impl Settings {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(path, &self.glossary)?;
+        std::fs::write(stt_model_path(), &self.stt_model)?;
         Ok(())
     }
 
@@ -111,6 +148,7 @@ mod tests {
     fn keyterms_trims_dedupes_and_skips_comments() {
         let s = Settings {
             glossary: "  Telepatia \n# a comment\n\nDatadog\nTelepatia\n".into(),
+            ..Default::default()
         };
         assert_eq!(s.keyterms(), vec!["Telepatia", "Datadog"]);
     }
@@ -119,6 +157,7 @@ mod tests {
     fn empty_glossary_yields_no_prompt() {
         let s = Settings {
             glossary: "\n  \n# only comments\n".into(),
+            ..Default::default()
         };
         assert!(s.keyterms().is_empty());
         assert!(s.llm_prompt().is_none());
@@ -131,6 +170,7 @@ mod tests {
                 "Datadog\n{}\nthis phrase has way too many words for a keyterm\n",
                 "a".repeat(80)
             ),
+            ..Default::default()
         };
         // STT keyterms exclude the 80-char term and the 9-word phrase.
         assert_eq!(s.keyterms(), vec!["Datadog"]);
@@ -144,6 +184,7 @@ mod tests {
     fn keyterms_allow_up_to_five_words() {
         let s = Settings {
             glossary: "one two three four five\nsix seven eight nine ten eleven".into(),
+            ..Default::default()
         };
         // 5 words (4 spaces) ok; 6 words (5 spaces) dropped.
         assert_eq!(s.keyterms(), vec!["one two three four five"]);

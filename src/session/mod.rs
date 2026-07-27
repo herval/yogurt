@@ -32,6 +32,8 @@ pub struct Session {
     pub end_time: Option<DateTime<Local>>,
     pub status: Status,
     pub transcript: Transcript,
+    pub stt_provider: String,
+    pub stt_model: String,
 }
 
 impl Session {
@@ -47,6 +49,8 @@ impl Session {
             end_time: None,
             status: Status::Idle,
             transcript: Transcript::default(),
+            stt_provider: String::new(),
+            stt_model: String::new(),
         }
     }
 
@@ -93,6 +97,8 @@ impl Session {
         m.insert("duration_secs".into(), self.duration_secs().into());
         m.insert("word_count".into(), self.transcript.word_count().into());
         m.insert("speaker_count".into(), self.transcript.speakers().len().into());
+        if !self.stt_provider.is_empty() { m.insert("stt_provider".into(), self.stt_provider.clone().into()); }
+        if !self.stt_model.is_empty() { m.insert("stt_model".into(), self.stt_model.clone().into()); }
         m
     }
 }

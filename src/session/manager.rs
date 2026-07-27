@@ -84,6 +84,9 @@ impl Manager {
         sample_rate: u32,
         channels: u16,
         session: &Arc<Mutex<Session>>,
+        provider_name: &str,
+        api_key: &str,
+        model_name: &str,
     ) -> Arc<Mutex<Box<dyn SttClient>>> {
         // Segment callbacks append to the captured session directly: batch
         // providers deliver during close(), when the session may no longer be
@@ -93,7 +96,7 @@ impl Manager {
         let events = self.events.clone();
         let events_replace = self.events.clone();
         let events_err = self.events.clone();
-        let provider = self.cfg.stt_provider.clone();
+        let provider = provider_name.to_string();
         let provider2 = provider.clone();
         let callbacks = SttCallbacks {
             on_segment: Arc::new(move |seg| {
@@ -128,17 +131,24 @@ impl Manager {
         };
         let keyterms = self.keyterms.lock().unwrap().clone();
         Arc::new(Mutex::new(new_stt_client(
-            &self.cfg.stt_provider,
-            &self.cfg.stt_api_key,
+            provider_name,
+            api_key,
             sample_rate,
             channels,
-            &self.cfg.stt_model,
+            model_name,
             keyterms,
             callbacks,
         )))
     }
 
     pub fn start_session(&self, name: &str) -> Result<()> {
+        let provider = self.cfg.stt_provider.clone();
+        let key = self.cfg.stt_api_key.clone();
+        let model = self.cfg.stt_model.clone();
+        self.start_session_with_stt(name, &provider, &key, &model)
+    }
+
+    pub fn start_session_with_stt(&self, name: &str, provider: &str, api_key: &str, model: &str) -> Result<()> {
         let mut active = self.active.lock().unwrap();
         if let Some(a) = active.as_ref() {
             if a.session.lock().unwrap().status == Status::Recording {
@@ -151,11 +161,12 @@ impl Manager {
             "starting session: device={} sampleRate={} stt={}/{}",
             device,
             self.cfg.sample_rate,
-            self.cfg.stt_provider,
-            self.cfg.stt_model
+            provider, model
         );
 
         let mut session = Session::new(name);
+        session.stt_provider = provider.to_string();
+        session.stt_model = model.to_string();
         session.status = Status::Recording;
         let session = Arc::new(Mutex::new(session));
 
@@ -168,7 +179,7 @@ impl Manager {
         let system_audio_enabled = std::env::var("YOGURT_SYSTEM_AUDIO")
             .map(|v| v != "0")
             .unwrap_or(true);
-        let stereo_capable = self.cfg.stt_provider == "elevenlabs";
+        let stereo_capable = provider == "elevenlabs";
         let mut system_tap = None;
         let mut channels: u16 = 1;
         let mic_tx = if system_audio_enabled {
@@ -199,12 +210,12 @@ impl Manager {
             tx.clone()
         };
 
-        let client = self.make_client(self.cfg.sample_rate, channels, &session);
+        let client = self.make_client(self.cfg.sample_rate, channels, &session, provider, api_key, model);
         client
             .lock()
             .unwrap()
             .connect()
-            .with_context(|| format!("connect to STT ({})", self.cfg.stt_provider))?;
+            .with_context(|| format!("connect to STT ({})", provider))?;
 
         let capture = Capture::start(device, self.cfg.sample_rate, mic_tx).map_err(|e| {
             let _ = client.lock().unwrap().close();
@@ -396,6 +407,8 @@ impl Manager {
             n => format!("{n}-recovered"),
         };
         let mut session = Session::new(&name);
+        session.stt_provider = self.cfg.stt_provider.clone();
+        session.stt_model = self.cfg.stt_model.clone();
         if let Some(start) = meta
             .get("start_time")
             .and_then(|v| v.as_str())
@@ -408,7 +421,7 @@ impl Manager {
         let end_time = session.start_time + chrono::Duration::milliseconds((secs * 1000.0) as i64);
         let session = Arc::new(Mutex::new(session));
 
-        let client = self.make_client(sample_rate, channels, &session);
+        let client = self.make_client(sample_rate, channels, &session, &self.cfg.stt_provider, &self.cfg.stt_api_key, &self.cfg.stt_model);
         client.lock().unwrap().connect()?;
         for chunk in pcm.chunks(TARGET_SEND_BYTES * channels as usize) {
             client.lock().unwrap().send_audio(chunk)?;
@@ -446,7 +459,7 @@ impl Manager {
 
         // Declare the file's real sample rate to the STT provider (the Go
         // version wrongly declared the configured mic rate).
-        let client = self.make_client(file_rate, 1, &session);
+        let client = self.make_client(file_rate, 1, &session, &self.cfg.stt_provider, &self.cfg.stt_api_key, &self.cfg.stt_model);
         client
             .lock()
             .unwrap()

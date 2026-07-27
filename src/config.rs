@@ -69,9 +69,11 @@ impl Config {
 
     pub fn validate(&self) -> Vec<String> {
         let mut errs = Vec::new();
-        if self.stt_api_key.is_empty() && self.stt_provider != "whisper" {
+        if self.stt_api_key.is_empty()
+            && !matches!(self.stt_provider.as_str(), "whisper" | "parakeet")
+        {
             errs.push(format!(
-                "missing STT API key: set {}_API_KEY (or use STT_MODEL=whisper/<model>)",
+                "missing STT API key: set {}_API_KEY (or use STT_MODEL=whisper/<model> or parakeet/<model>)",
                 self.stt_provider.to_uppercase()
             ));
         }
@@ -83,6 +85,13 @@ impl Config {
         }
         errs
     }
+
+    pub fn set_stt_model(&mut self, raw: &str) {
+        (self.stt_provider, self.stt_model) = parse_provider_model(raw, "assemblyai");
+        self.stt_api_key = provider_api_key(&self.stt_provider);
+    }
+
+    pub fn api_key_for(&self, provider: &str) -> String { provider_api_key(provider) }
 
     pub fn abs_sessions_dir(&self) -> PathBuf {
         let p = Path::new(&self.sessions_dir);

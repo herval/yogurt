@@ -59,6 +59,10 @@ fn main() {
 
     let cli = Cli::parse();
     let mut cfg = Config::from_env();
+    let saved_settings = settings::Settings::load();
+    if std::env::var("STT_MODEL").is_err() && !saved_settings.stt_model.is_empty() {
+        cfg.set_stt_model(&saved_settings.stt_model);
+    }
 
     if let Some(dir) = &cli.sessions_dir {
         cfg.sessions_dir = dir.clone();

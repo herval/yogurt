@@ -1,5 +1,7 @@
 pub mod assemblyai;
 pub mod elevenlabs;
+#[cfg(feature = "parakeet")]
+pub mod parakeet;
 #[cfg(feature = "whisper")]
 pub mod whisper;
 
@@ -88,7 +90,7 @@ impl Transcript {
 
 /// Synchronous event callbacks, shared with provider worker threads.
 ///
-/// INVARIANT: batch providers (elevenlabs, whisper) deliver ALL their segments
+/// INVARIANT: batch providers (elevenlabs, whisper, parakeet) deliver ALL their segments
 /// via on_segment inside close(), before it returns — session finish depends
 /// on this ordering.
 #[derive(Clone)]
@@ -129,6 +131,7 @@ pub fn new_stt_client(
             callbacks,
         )),
         "whisper" => new_whisper_client(sample_rate, model, callbacks),
+        "parakeet" => new_parakeet_client(sample_rate, model, callbacks),
         _ => Box::new(assemblyai::AssemblyAiClient::new(
             api_key,
             sample_rate,
@@ -136,6 +139,28 @@ pub fn new_stt_client(
             callbacks,
         )),
     }
+}
+
+#[cfg(feature = "parakeet")]
+fn new_parakeet_client(sample_rate: u32, model: &str, cbs: SttCallbacks) -> Box<dyn SttClient> {
+    Box::new(parakeet::ParakeetClient::new(sample_rate, model, cbs))
+}
+
+#[cfg(not(feature = "parakeet"))]
+fn new_parakeet_client(_sample_rate: u32, _model: &str, _cbs: SttCallbacks) -> Box<dyn SttClient> {
+    struct ParakeetStub;
+    impl SttClient for ParakeetStub {
+        fn connect(&mut self) -> Result<()> {
+            anyhow::bail!("parakeet support not compiled in; rebuild with --features parakeet")
+        }
+        fn send_audio(&self, _pcm: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+    Box::new(ParakeetStub)
 }
 
 #[cfg(feature = "whisper")]

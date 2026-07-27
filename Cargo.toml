@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = []
 whisper = ["dep:whisper-rs"]
+parakeet = ["dep:parakeet-rs"]
 
 [dependencies]
 anyhow = "1"
@@ -23,6 +24,7 @@ tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 unicode-width = "0.2"
 ureq = { version = "3", features = ["json"] }
 whisper-rs = { version = "0.14", optional = true, features = ["metal"] }
+parakeet-rs = { version = "0.3.6", optional = true, default-features = false, features = ["cpu", "ort-defaults"] }
 
 ratatui = "0.29"
 crossterm = "0.28"
