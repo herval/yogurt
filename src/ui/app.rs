@@ -95,6 +95,7 @@ pub struct App {
 
     quitting: bool,
     pub should_quit: bool,
+    finish_pending: bool,
 }
 
 impl App {
@@ -154,6 +155,7 @@ impl App {
             confirm_delete: false,
             quitting: false,
             should_quit: false,
+            finish_pending: false,
         }
     }
 
@@ -179,6 +181,7 @@ impl App {
                 stt_err,
                 err,
             } => {
+                self.finish_pending = false;
                 // Saves are async (the close pass can take a while); if a new
                 // recording already started, don't yank its view or chat
                 // scope — the current Live scope belongs to the new session,
@@ -695,6 +698,7 @@ impl App {
             },
             KeyCode::Char('f') | KeyCode::Char('F') => {
                 if matches!(self.status, Status::Recording | Status::Paused) {
+                    self.finish_pending = true;
                     self.cmd_finish();
                 }
             }
@@ -784,7 +788,11 @@ impl App {
     fn quit(&mut self) {
         if matches!(self.status, Status::Recording | Status::Paused) {
             self.quitting = true;
+            self.finish_pending = true;
             self.cmd_finish();
+        } else if self.finish_pending {
+            self.quitting = true;
+            self.set_notice("Finishing and saving the meeting before quitting...", false);
         } else {
             // Keep a just-typed user turn; its reply can't arrive anymore.
             self.persist_chat();
