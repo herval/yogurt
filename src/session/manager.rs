@@ -141,13 +141,6 @@ impl Manager {
         )))
     }
 
-    pub fn start_session(&self, name: &str) -> Result<()> {
-        let provider = self.cfg.stt_provider.clone();
-        let key = self.cfg.stt_api_key.clone();
-        let model = self.cfg.stt_model.clone();
-        self.start_session_with_stt(name, &provider, &key, &model)
-    }
-
     pub fn start_session_with_stt(&self, name: &str, provider: &str, api_key: &str, model: &str) -> Result<()> {
         let mut active = self.active.lock().unwrap();
         if let Some(a) = active.as_ref() {
