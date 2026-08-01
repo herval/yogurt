@@ -45,7 +45,9 @@ impl WhisperClient {
             WhisperContextParameters::default(),
         )?;
         let mut state = ctx.create_state()?;
-        let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+        params.set_language(Some("auto"));
         state.full(params, &samples)?;
 
         let mut segments = Vec::new();
