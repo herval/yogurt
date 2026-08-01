@@ -23,7 +23,7 @@ symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
 tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 unicode-width = "0.2"
 ureq = { version = "3", features = ["json"] }
-whisper-rs = { version = "0.14", optional = true, features = ["metal"] }
+whisper-rs = { version = "0.14", optional = true, features = ["metal", "log_backend"] }
 parakeet-rs = { version = "0.3.6", optional = true, default-features = false, features = ["cpu", "ort-defaults"] }
 
 ratatui = "0.29"
