@@ -40,12 +40,19 @@ impl WhisperClient {
             self.model_path.display()
         );
 
+        // whisper.cpp and GGML log to stderr by default, which corrupts the
+        // alt-screen TUI. Route them through `log` (i.e. into yogurt.log).
+        static LOG_HOOKS: std::sync::Once = std::sync::Once::new();
+        LOG_HOOKS.call_once(whisper_rs::install_logging_hooks);
+
         let ctx = WhisperContext::new_with_params(
             &self.model_path.to_string_lossy(),
             WhisperContextParameters::default(),
         )?;
         let mut state = ctx.create_state()?;
-        let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+        params.set_language(Some("auto"));
         state.full(params, &samples)?;
 
         let mut segments = Vec::new();
